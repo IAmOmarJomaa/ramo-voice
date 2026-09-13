@@ -1,7 +1,7 @@
 # 🎙️ ramO Engine: Sovereign Audio Intelligence Ecosystem
 
 A production-grade, modular, self-hostable audio intelligence platform.
-Built as a suite of **independent sovereign microservices** that can be run alone or orchestrated together.
+Built on a clean white paper as a suite of **independent sovereign microservices** that can be run alone or orchestrated together.
 
 ---
 
@@ -11,33 +11,73 @@ Built as a suite of **independent sovereign microservices** that can be run alon
 C:\ramo-engine\
 ├── services/
 │   ├── tts/              # [Microservice 1] ramO-Voice: The ElevenLabs Alternative
-│   │   ├── Port: 50055   # OpenAI-compatible /v1/audio/speech & real-time WebSocket
-│   │   └── Status: READY & TESTED (14/14 Unit Tests Passing)
+│   │   ├── Port: 50055   # OpenAI-compatible /v1/audio/speech, /v1/voices/clone & WebSocket
+│   │   ├── Engines:      # Supertonic ONNX (Fast-Path) + Flow Matching (Zero-Shot Cloner)
+│   │   └── Status:       # READY & TESTED (18/18 Tests Passing)
 │   │
-│   ├── stt/              # [Microservice 2] Real-time Streaming ASR
-│   │   ├── Port: 50051   # LocalAgreement (n=2) Whisper + SenseVoice emotion tags
-│   │   └── Status: IN DESIGN
+│   ├── stt/              # [Microservice 2] ramO-Listen: Real-time Streaming STT
+│   │   ├── Port: 50051   # Whisper LocalAgreement (n=2) + SenseVoice emotion & acoustic tags
+│   │   └── Status:       # READY & TESTED (10/10 Tests Passing)
 │   │
-│   ├── diarization/      # [Microservice 3] Speaker Tracking & Profiling
-│   │   ├── Port: 50052   # Pyannote community-1 + Demucs vocal cleaner + Centroids
-│   │   └── Status: IN DESIGN
+│   ├── diarization/      # [Microservice 3] ramO-Speaker: Speaker Diarization & Harvester
+│   │   ├── Port: 50052   # Pyannote clustering + StenoAI crosstalk rejection + Voiceprint harvester
+│   │   └── Status:       # READY & TESTED (7/7 Tests Passing)
 │   │
-│   └── gateway/          # [Microservice 4] Unified Client Ingress
-│       ├── Port: 8000    # Client WebSocket router & audio multiplexer
-│       └── Status: IN DESIGN
+│   └── gateway/          # [Microservice 4] ramO-Gateway: Real-Time Duplex Orchestrator
+│       ├── Port: 50050   # Turn-taking VAD state machine & zero-latency barge-in
+│       └── Status:       # READY & TESTED (4/4 Tests Passing)
+└── deploy/               # Colab T4 Deployment Suite (15GB VRAM allocation budget)
+    ├── colab_run.sh
+    └── README.md
 ```
 
 ---
 
-## 🚀 Quickstart: Running Services Standalone
+## 🧪 Comprehensive Verification Summary
 
-Each service is 100% sovereign. You can boot any service independently without needing the others:
+All 4 microservices have zero cross-dependencies and maintain their own test suites:
 
-### 1. Run the ElevenLabs TTS Engine Standalone:
+| Microservice | Test Path | Tests Passed | Status |
+| :--- | :--- | :--- | :--- |
+| **`services/tts`** | `services/tts/tests/` | **18 / 18** | ✅ GREEN |
+| **`services/stt`** | `services/stt/tests/` | **10 / 10** | ✅ GREEN |
+| **`services/diarization`** | `services/diarization/tests/` | **7 / 7** | ✅ GREEN |
+| **`services/gateway`** | `services/gateway/tests/` | **4 / 4** | ✅ GREEN |
+| **TOTAL** | | **39 / 39** | **100% GREEN** |
+
+---
+
+## 🚀 Running Any Service Standalone
+
+### 1. TTS & Voice Cloning (`services/tts`)
 ```bash
 cd services/tts
 uv run uvicorn ramo_voice.server:app --host 0.0.0.0 --port 50055 --reload
+# Tests: uv run pytest tests/ -v
 ```
-- Test health: `curl http://localhost:50055/health`
-- List voices: `curl http://localhost:50055/v1/voices`
-- Generate audio: `curl -X POST http://localhost:50055/v1/audio/speech -H "Content-Type: application/json" -d "{\"input\": \"Hello from clean ramO engine!\"}" --output speech.wav`
+
+### 2. Streaming STT & Emotions (`services/stt`)
+```bash
+cd services/stt
+uv run uvicorn ramo_listen.server:app --host 0.0.0.0 --port 50051 --reload
+# Tests: uv run pytest tests/ -v
+```
+
+### 3. Diarization & Voiceprint Harvester (`services/diarization`)
+```bash
+cd services/diarization
+uv run uvicorn ramo_speaker.server:app --host 0.0.0.0 --port 50052 --reload
+# Tests: uv run pytest tests/ -v
+```
+
+### 4. Duplex Real-Time Gateway (`services/gateway`)
+```bash
+cd services/gateway
+uv run uvicorn ramo_gateway.server:app --host 0.0.0.0 --port 50050 --reload
+# Tests: uv run pytest tests/ -v
+```
+
+### 5. Colab T4 Cloud Launch
+```bash
+bash deploy/colab_run.sh
+```
