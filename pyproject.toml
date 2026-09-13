@@ -1,0 +1,17 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ramo-engine"
+version = "0.1.0"
+description = "Sovereign Audio Intelligence Ecosystem (TTS, STT, Diarization, Gateway)"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [{ name = "Bridge AI & ramO Team" }]
+
+[tool.uv.workspace]
+members = [
+    "services/tts",
+]

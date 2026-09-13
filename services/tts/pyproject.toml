@@ -1,0 +1,42 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ramo-voice"
+version = "0.1.0"
+description = "Sovereign ElevenLabs-alternative Speech Synthesis & Voice Cloning Engine."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [{ name = "Bridge AI & ramO Team" }]
+keywords = ["tts", "voice-cloning", "elevenlabs", "streaming", "audio"]
+
+dependencies = [
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.28.0",
+    "pydantic>=2.0.0",
+    "numpy>=1.24.0,<2.0.0",
+    "soundfile>=0.12.0",
+    "onnxruntime>=1.17.0",
+    "scipy>=1.10.0",
+    "python-multipart>=0.0.9",
+]
+
+[project.optional-dependencies]
+cuda = [
+    "onnxruntime-gpu>=1.17.0",
+    "torch>=2.2.0",
+    "torchaudio>=2.2.0",
+]
+cloning = [
+    "demucs>=4.0.0",
+]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "httpx>=0.27.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ramo_voice"]
