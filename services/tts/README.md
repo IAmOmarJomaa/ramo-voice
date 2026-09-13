@@ -60,6 +60,21 @@ The server yields raw 16-bit PCM binary chunks with 50ms equal-power crossfades.
 
 ---
 
+## 🏛️ Dual-Engine Architecture
+
+1. **Supertonic ONNX Fast-Path (`SupertonicEngine`)**:
+   - 44.1kHz studio speech with 0 MB GPU VRAM.
+   - Sub-90ms Time-To-First-Audio (TTFA).
+   - Handles instant preset voices (`af_heart`, `am_adam`).
+
+2. **Flow Matching Zero-Shot Cloner (`FlowMatchingCloningEngine`)**:
+   - Continuous Flow Matching (CFM) with optimal transport Euler ODE solver.
+   - **Zero Whisper/ASR Dependency**: Ingests direct acoustic conditioning latents directly from raw audio waveforms.
+   - Eliminates ASR transcription latency (saved 4.5s) and completely avoids autoregressive syllable stuttering loops.
+   - Automatically engaged when synthesizing with `cloned` voice profiles.
+
+---
+
 ## 🧪 Running Unit & Integration Tests
 
 ```bash

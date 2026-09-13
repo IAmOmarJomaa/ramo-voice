@@ -17,8 +17,8 @@ logger = logging.getLogger("ramo_voice.profiles")
 class VoiceProfile:
     voice_id: str
     name: str
-    voice_type: str  # "preset" or "cloned"
-    sample_rate: int
+    voice_type: str = "preset"  # "preset" or "cloned"
+    sample_rate: int = 44100
     conditioning_latents: Optional[np.ndarray] = None
     speaker_embedding: Optional[np.ndarray] = None
     reference_wav_path: Optional[str] = None

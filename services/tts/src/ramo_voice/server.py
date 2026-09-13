@@ -17,7 +17,9 @@ from pydantic import BaseModel, Field
 import numpy as np
 
 from .profiles import default_store, VoiceProfile
+from .engines.base import BaseTTSEngine
 from .engines.supertonic_engine import SupertonicEngine
+from .engines.cloning_engine import FlowMatchingCloningEngine
 from .chunker import split_text_into_chunks, concatenate_audio_chunks
 from .purifier import clean_vocal_prompt
 
@@ -25,12 +27,21 @@ logger = logging.getLogger("ramo_voice.server")
 
 # Active engines
 supertonic_engine = SupertonicEngine()
+cloning_engine = FlowMatchingCloningEngine()
+
+
+def get_engine_for_profile(profile: Optional[VoiceProfile]) -> BaseTTSEngine:
+    """Route voice request: cloned voices to flow matching, presets to instant ONNX."""
+    if profile and profile.voice_type == "cloned":
+        return cloning_engine
+    return supertonic_engine
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Initializing ramo_voice engines and registering default presets...")
     await supertonic_engine.load()
+    await cloning_engine.load()
 
     # Seed default profiles
     default_store.register(VoiceProfile(
@@ -80,9 +91,10 @@ def _pcm16_to_wav(pcm_float32: np.ndarray, sample_rate: int) -> bytes:
 async def health():
     return {
         "status": "healthy",
-        "engine": "supertonic-3",
+        "engine": supertonic_engine.engine_id,
+        "engines": [supertonic_engine.engine_id, cloning_engine.engine_id],
         "registered_voices": len(default_store.list_profiles()),
-        "sample_rate": 44100
+        "default_sample_rate": 44100
     }
 
 
@@ -111,18 +123,19 @@ async def generate_speech(req: SpeechRequest):
     if not profile:
         profile = default_store.get("af_heart")
 
+    engine = get_engine_for_profile(profile)
     chunks = split_text_into_chunks(req.input)
     audio_chunks = []
-    sr = 44100
+    sr = engine.sample_rate
 
     for chunk in chunks:
-        audio, chunk_sr = await supertonic_engine.generate_chunk(chunk, profile, speed=req.speed)
+        audio, chunk_sr = await engine.generate_chunk(chunk, profile, speed=req.speed)
         audio_chunks.append(audio)
         sr = chunk_sr
 
     final_audio = concatenate_audio_chunks(audio_chunks, sample_rate=sr)
     latency_ms = (time.perf_counter() - t0) * 1000
-    logger.info(f"Synthesized {len(req.input)} chars in {latency_ms:.1f}ms (RTF: {latency_ms / (len(final_audio) / sr * 1000):.2f})")
+    logger.info(f"Synthesized {len(req.input)} chars using {engine.engine_id} in {latency_ms:.1f}ms (RTF: {latency_ms / (len(final_audio) / sr * 1000):.2f})")
 
     wav_bytes = _pcm16_to_wav(final_audio, sr)
     return StreamingResponse(io.BytesIO(wav_bytes), media_type="audio/wav")
@@ -149,7 +162,7 @@ async def clone_voice(
         voice_id=voice_id,
         name=name or voice_id,
         voice_type="cloned",
-        sample_rate=44100,
+        sample_rate=24000,
         conditioning_latents=clean_audio
     )
     default_store.register(profile)
@@ -157,7 +170,7 @@ async def clone_voice(
         "status": "success",
         "voice_id": voice_id,
         "name": profile.name,
-        "sample_rate": 44100,
+        "sample_rate": 24000,
         "duration_sec": len(clean_audio) / sr
     }
 
@@ -172,9 +185,10 @@ async def websocket_stream(ws: WebSocket):
             text = data.get("text", "")
             voice_id = data.get("voice", "af_heart")
             profile = default_store.get(voice_id) or default_store.get("af_heart")
+            engine = get_engine_for_profile(profile)
 
             if text.strip():
-                async for audio_chunk in supertonic_engine.generate_stream(text, profile):
+                async for audio_chunk in engine.generate_stream(text, profile):
                     pcm_int16 = (np.clip(audio_chunk, -1.0, 1.0) * 32767).astype(np.int16)
                     await ws.send_bytes(pcm_int16.tobytes())
                 await ws.send_json({"type": "done"})
