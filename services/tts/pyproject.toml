@@ -40,3 +40,9 @@ dev = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ramo_voice"]
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = ["tests"]
+pythonpath = ["src", "../common/src"]
+asyncio_mode = "auto"

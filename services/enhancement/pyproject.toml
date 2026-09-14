@@ -39,5 +39,5 @@ packages = ["src/ramo_clean"]
 [tool.pytest.ini_options]
 minversion = "7.0"
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = ["src", "../common/src"]
 asyncio_mode = "auto"

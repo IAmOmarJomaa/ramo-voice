@@ -19,8 +19,9 @@ from pydantic import BaseModel
 from .buffer import AudioRingBuffer
 from .local_agreement import LocalAgreement
 from .engines.sensevoice_engine import SenseVoiceEngine
+from ramo_common.logging import setup_service_logging, tail_service_log
 
-logger = logging.getLogger("ramo_listen.server")
+logger = setup_service_logging("ramo_listen")
 
 engine = SenseVoiceEngine()
 
@@ -41,12 +42,18 @@ app = FastAPI(
 
 
 @app.get("/health")
+@app.get("/v1/health")
 async def health():
     return {
         "status": "healthy",
         "engine": engine.engine_id,
         "sample_rate": engine.sample_rate
     }
+
+
+@app.get("/logs")
+async def get_logs(tail: int = 100):
+    return {"service": "ramo_listen", "lines": tail_service_log("ramo_listen", n=tail)}
 
 
 @app.post("/v1/audio/transcriptions")

@@ -22,15 +22,18 @@ from .engines.base import BaseTTSEngine
 from .engines.supertonic_engine import SupertonicEngine
 from .engines.cloning_engine import FlowMatchingCloningEngine
 from .engines.f5_engine import F5TTSEngine
+from .engines.kokoro_engine import KokoroEngine
 from .chunker import split_text_into_chunks, concatenate_audio_chunks
 from .purifier import clean_vocal_prompt
+from ramo_common.logging import setup_service_logging, tail_service_log
 
-logger = logging.getLogger("ramo_voice.server")
+logger = setup_service_logging("ramo_voice")
 
 # Active engines
 supertonic_engine = SupertonicEngine()
 cloning_engine = FlowMatchingCloningEngine()
 f5_engine = F5TTSEngine()
+kokoro_engine = KokoroEngine()
 
 
 def get_engine_for_profile(profile: Optional[VoiceProfile]) -> BaseTTSEngine:
@@ -38,10 +41,13 @@ def get_engine_for_profile(profile: Optional[VoiceProfile]) -> BaseTTSEngine:
     Route voice request:
     - prompt_text + >= 4.5s audio -> F5-TTS Flow Matching.
     - raw audio latents (no text) -> FlowMatchingCloningEngine.
-    - use_fallback or preset -> Supertonic ONNX Fast-Path.
+    - kokoro voice -> KokoroEngine (24kHz).
+    - use_fallback or preset -> Supertonic ONNX Fast-Path (44.1kHz).
     """
     if not profile:
         return supertonic_engine
+    if "kokoro" in profile.voice_id.lower() or profile.voice_type == "kokoro":
+        return kokoro_engine
     if profile.use_fallback or profile.voice_type == "preset":
         return supertonic_engine
     if profile.prompt_text:
@@ -57,6 +63,7 @@ async def lifespan(app: FastAPI):
     await supertonic_engine.load()
     await cloning_engine.load()
     await f5_engine.load()
+    await kokoro_engine.load()
 
     # Seed default profiles
     default_store.register(VoiceProfile(
@@ -71,6 +78,13 @@ async def lifespan(app: FastAPI):
         name="Adam (Natural Male)",
         voice_type="preset",
         sample_rate=44100,
+        language="en"
+    ))
+    default_store.register(VoiceProfile(
+        voice_id="kokoro_female",
+        name="Kokoro (Expressive Neural Female)",
+        voice_type="kokoro",
+        sample_rate=24000,
         language="en"
     ))
     yield
@@ -103,6 +117,7 @@ def _pcm16_to_wav(pcm_float32: np.ndarray, sample_rate: int) -> bytes:
 
 
 @app.get("/health")
+@app.get("/v1/health")
 async def health():
     return {
         "status": "healthy",
@@ -111,6 +126,11 @@ async def health():
         "registered_voices": len(default_store.list_profiles()),
         "default_sample_rate": 44100
     }
+
+
+@app.get("/logs")
+async def get_logs(tail: int = 100):
+    return {"service": "ramo_voice", "lines": tail_service_log("ramo_voice", n=tail)}
 
 
 @app.get("/v1/voices")

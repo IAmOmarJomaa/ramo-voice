@@ -14,8 +14,9 @@ from fastapi import FastAPI, File, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response
 
 from ramo_clean.pipeline import AudioPreconditioner
+from ramo_common.logging import setup_service_logging, tail_service_log
 
-logger = logging.getLogger(__name__)
+logger = setup_service_logging("ramo_clean")
 
 app = FastAPI(
     title="ramO Clean (Audio Preconditioning Service)",
@@ -26,6 +27,7 @@ app = FastAPI(
 preconditioner = AudioPreconditioner(sample_rate=16000)
 
 
+@app.get("/health")
 @app.get("/v1/health")
 async def health():
     return {
@@ -34,6 +36,11 @@ async def health():
         "sample_rate": 16000,
         "stages": ["hpf_80hz", "spectral_gate", "agc_-20dbfs", "silero_vad_v5"],
     }
+
+
+@app.get("/logs")
+async def get_logs(tail: int = 100):
+    return {"service": "ramo_clean", "lines": tail_service_log("ramo_clean", n=tail)}
 
 
 @app.post("/v1/audio/clean")

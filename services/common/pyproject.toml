@@ -1,0 +1,16 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ramo-common"
+version = "0.1.0"
+description = "Shared logging, observability, and utilities for ramO Engine"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.100.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ramo_common"]

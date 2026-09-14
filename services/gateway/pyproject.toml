@@ -29,5 +29,13 @@ packages = ["src/ramo_gateway"]
 [tool.pytest.ini_options]
 minversion = "7.0"
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = [
+    "src",
+    "../common/src",
+    "../enhancement/src",
+    "../stt/src",
+    "../diarization/src",
+    "../translation/src",
+    "../tts/src",
+]
 asyncio_mode = "auto"

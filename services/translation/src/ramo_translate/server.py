@@ -12,8 +12,9 @@ from pydantic import BaseModel, Field
 
 from .router import TranslationRouter
 from .action_detector import detect_action_item
+from ramo_common.logging import setup_service_logging, tail_service_log
 
-logger = logging.getLogger("ramo_translate.server")
+logger = setup_service_logging("ramo_translate")
 
 app = FastAPI(
     title="ramO Translation & Intelligence API",
@@ -52,6 +53,7 @@ class ActionItemResponse(BaseModel):
 
 
 @app.get("/health")
+@app.get("/v1/health")
 async def health():
     return {
         "status": "healthy",
@@ -59,6 +61,11 @@ async def health():
         "engine": router.engine.engine_id,
         "default_port": 50053,
     }
+
+
+@app.get("/logs")
+async def get_logs(tail: int = 100):
+    return {"service": "ramo_translate", "lines": tail_service_log("ramo_translate", n=tail)}
 
 
 @app.post("/v1/translate", response_model=TranslationResponse)

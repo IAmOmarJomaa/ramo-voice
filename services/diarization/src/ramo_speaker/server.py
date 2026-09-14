@@ -17,8 +17,9 @@ from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from .cluster import SpeakerClusterer
 from .segmenter import AudioSegmenter
 from .harvester import VoiceprintHarvester, SpeakerTurn
+from ramo_common.logging import setup_service_logging, tail_service_log
 
-logger = logging.getLogger("ramo_speaker.server")
+logger = setup_service_logging("ramo_speaker")
 
 clusterer = SpeakerClusterer(similarity_threshold=0.75, momentum=0.85)
 segmenter = AudioSegmenter(sample_rate=16000)
@@ -40,6 +41,7 @@ app = FastAPI(
 
 
 @app.get("/health")
+@app.get("/v1/health")
 async def health():
     return {
         "status": "healthy",
@@ -47,6 +49,11 @@ async def health():
         "tracked_speakers": len(clusterer.get_speakers()),
         "sample_rate": 16000
     }
+
+
+@app.get("/logs")
+async def get_logs(tail: int = 100):
+    return {"service": "ramo_speaker", "lines": tail_service_log("ramo_speaker", n=tail)}
 
 
 @app.post("/v1/diarize")

@@ -19,6 +19,7 @@ members = [
     "services/gateway",
     "services/enhancement",
     "services/translation",
+    "services/common",
 ]
 
 [tool.pytest.ini_options]
@@ -30,4 +31,5 @@ pythonpath = [
     "services/gateway/src",
     "services/enhancement/src",
     "services/translation/src",
+    "services/common/src",
 ]
