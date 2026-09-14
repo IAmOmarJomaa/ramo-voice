@@ -21,6 +21,7 @@ from ramo_voice.profiles import VoiceProfileStore, register_meeting_speaker
 from ramo_voice.engines.supertonic_engine import SupertonicEngine
 from ramo_voice.engines.f5_engine import F5TTSEngine
 from ramo_voice.server import get_engine_for_profile
+from ramo_translate.router import TranslationRouter
 
 
 @pytest.mark.asyncio
@@ -96,9 +97,28 @@ async def test_end_to_end_meeting_translation_flow():
     assert alice_profile.voice_type == "cloned"
     assert not alice_profile.use_fallback
 
-    # Step 6: Simulate LLM Translation output for Alice
-    # Alice spoke English, translation target is French: "Bonjour tout le monde."
-    translated_text = "Bonjour tout le monde."
+    # Step 6: Real LLM Translation using TranslationRouter (Microservice 3)
+    trans_router = TranslationRouter()
+    alice_trans = await trans_router.translate(
+        text="Hello everyone.",
+        source_lang="en",
+        target_lang="fr",
+        session_id="meeting_e2e",
+        speaker_id=alice_spk_id,
+    )
+    assert alice_trans.translated_text == "Bonjour tout le monde."
+    assert alice_trans.speaker_symbol == "[S_A]"
+
+    # Test conversational fast-bypass in meeting context (0 ms)
+    fast_turn = await trans_router.translate(
+        text="Okay.",
+        source_lang="en",
+        target_lang="fr",
+        session_id="meeting_e2e",
+        speaker_id=alice_spk_id,
+    )
+    assert fast_turn.is_bypass
+    assert fast_turn.translated_text == "D'accord."
 
     # Step 7: Verify router selects F5-TTS for Alice (because >= 4.5s and prompt_text present)
     alice_engine = get_engine_for_profile(alice_profile)
@@ -106,7 +126,7 @@ async def test_end_to_end_meeting_translation_flow():
 
     # Synthesize translated speech in Alice's cloned voice via F5-TTS
     synth_audio, out_sr = await alice_engine.generate_chunk(
-        text=translated_text,
+        text=alice_trans.translated_text,
         profile=alice_profile,
     )
     assert synth_audio is not None
@@ -139,13 +159,23 @@ async def test_end_to_end_meeting_translation_flow():
     assert bob_profile.voice_type == "preset"
     assert bob_profile.fallback_preset is not None
 
+    # Bob's speech translated via TranslationRouter
+    bob_trans = await trans_router.translate(
+        text="I agree with Alice.",
+        source_lang="en",
+        target_lang="fr",
+        session_id="meeting_e2e",
+        speaker_id="SPEAKER_01",
+    )
+    assert bob_trans.translated_text == "Je suis d'accord avec Alice."
+
     # Verify router selects Supertonic for Bob (fallback)
     bob_engine = get_engine_for_profile(bob_profile)
     assert isinstance(bob_engine, SupertonicEngine)
 
     # Bob's translated speech synthesized via instant Supertonic preset
     bob_synth_audio, bob_sr = await bob_engine.generate_chunk(
-        text="Je suis d'accord avec Alice.",
+        text=bob_trans.translated_text,
         profile=bob_profile,
     )
     assert bob_synth_audio is not None

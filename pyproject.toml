@@ -18,6 +18,7 @@ members = [
     "services/diarization",
     "services/gateway",
     "services/enhancement",
+    "services/translation",
 ]
 
 [tool.pytest.ini_options]
@@ -28,4 +29,5 @@ pythonpath = [
     "services/diarization/src",
     "services/gateway/src",
     "services/enhancement/src",
+    "services/translation/src",
 ]
