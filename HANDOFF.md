@@ -2,9 +2,9 @@
 
 > **Repository Root**: `C:\ramo-engine`  
 > **Git Status**: Clean, versioned commit history on `master` branch  
-> **Verification Status**: **77 / 77 Tests Passing (100% Green in 5.16s)**  
+> **Verification Status**: **91 / 91 Tests Passing (100% Green)**  
 > **Hardware Target**: 15GB VRAM (Google Colab T4 GPU / Local Workstation / Laptop)  
-> **Network Protocol**: OpenAI-compatible REST endpoints (`/v1/audio/speech`, `/v1/audio/transcriptions`, `/v1/chat/completions`) & Real-Time Full-Duplex WebSockets (`/v1/stream`) with Tailscale Google Auth  
+> **Network Protocol**: OpenAI-compatible REST endpoints (`/v1/audio/speech`, `/v1/audio/transcriptions`, `/v1/translate`) & Real-Time Full-Duplex WebSockets (`ws://0.0.0.0:50000/v1/stream`)  
 
 ---
 
