@@ -17,6 +17,7 @@ members = [
     "services/stt",
     "services/diarization",
     "services/gateway",
+    "services/enhancement",
 ]
 
 [tool.pytest.ini_options]
@@ -26,4 +27,5 @@ pythonpath = [
     "services/stt/src",
     "services/diarization/src",
     "services/gateway/src",
+    "services/enhancement/src",
 ]

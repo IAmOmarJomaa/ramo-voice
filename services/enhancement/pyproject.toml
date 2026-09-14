@@ -1,0 +1,43 @@
+[project]
+name = "ramo-clean"
+version = "0.1.0"
+description = "Sovereign 5-Stage Audio Preconditioning & Intelligence Microservice (HPF, Silero VAD v5, Spectral Gate, AGC, Demucs)"
+authors = [{ name = "Omar Jomaa", email = "iamomarjomaa@gmail.com" }]
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn>=0.30.0",
+    "numpy>=1.26.0",
+    "scipy>=1.13.0",
+    "soundfile>=0.12.1",
+    "pydantic>=2.8.0",
+    "websockets>=12.0",
+    "python-multipart>=0.0.9",
+]
+
+[project.optional-dependencies]
+onnx = [
+    "onnxruntime>=1.17.0",
+]
+demucs = [
+    "torch>=2.0.0",
+    "demucs>=4.0.0",
+]
+test = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "httpx>=0.27.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ramo_clean"]
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = ["tests"]
+pythonpath = ["src"]
+asyncio_mode = "auto"
