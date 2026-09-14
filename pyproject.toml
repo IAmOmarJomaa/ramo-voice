@@ -14,4 +14,16 @@ authors = [{ name = "Bridge AI & ramO Team" }]
 [tool.uv.workspace]
 members = [
     "services/tts",
+    "services/stt",
+    "services/diarization",
+    "services/gateway",
+]
+
+[tool.pytest.ini_options]
+addopts = "--import-mode=importlib"
+pythonpath = [
+    "services/tts/src",
+    "services/stt/src",
+    "services/diarization/src",
+    "services/gateway/src",
 ]

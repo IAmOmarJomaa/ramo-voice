@@ -15,11 +15,13 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Uplo
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 import numpy as np
+import soundfile as sf
 
-from .profiles import default_store, VoiceProfile
+from .profiles import default_store, VoiceProfile, register_meeting_speaker
 from .engines.base import BaseTTSEngine
 from .engines.supertonic_engine import SupertonicEngine
 from .engines.cloning_engine import FlowMatchingCloningEngine
+from .engines.f5_engine import F5TTSEngine
 from .chunker import split_text_into_chunks, concatenate_audio_chunks
 from .purifier import clean_vocal_prompt
 
@@ -28,11 +30,23 @@ logger = logging.getLogger("ramo_voice.server")
 # Active engines
 supertonic_engine = SupertonicEngine()
 cloning_engine = FlowMatchingCloningEngine()
+f5_engine = F5TTSEngine()
 
 
 def get_engine_for_profile(profile: Optional[VoiceProfile]) -> BaseTTSEngine:
-    """Route voice request: cloned voices to flow matching, presets to instant ONNX."""
-    if profile and profile.voice_type == "cloned":
+    """
+    Route voice request:
+    - prompt_text + >= 4.5s audio -> F5-TTS Flow Matching.
+    - raw audio latents (no text) -> FlowMatchingCloningEngine.
+    - use_fallback or preset -> Supertonic ONNX Fast-Path.
+    """
+    if not profile:
+        return supertonic_engine
+    if profile.use_fallback or profile.voice_type == "preset":
+        return supertonic_engine
+    if profile.prompt_text:
+        return f5_engine
+    if profile.voice_type == "cloned":
         return cloning_engine
     return supertonic_engine
 
@@ -42,6 +56,7 @@ async def lifespan(app: FastAPI):
     logger.info("Initializing ramo_voice engines and registering default presets...")
     await supertonic_engine.load()
     await cloning_engine.load()
+    await f5_engine.load()
 
     # Seed default profiles
     default_store.register(VoiceProfile(
@@ -92,7 +107,7 @@ async def health():
     return {
         "status": "healthy",
         "engine": supertonic_engine.engine_id,
-        "engines": [supertonic_engine.engine_id, cloning_engine.engine_id],
+        "engines": [supertonic_engine.engine_id, cloning_engine.engine_id, f5_engine.engine_id],
         "registered_voices": len(default_store.list_profiles()),
         "default_sample_rate": 44100
     }
@@ -172,6 +187,48 @@ async def clone_voice(
         "name": profile.name,
         "sample_rate": 24000,
         "duration_sec": len(clean_audio) / sr
+    }
+
+
+class SpeakerRegisterRequest(BaseModel):
+    speaker_id: str = Field(..., description="Unique ID for the speaker in the meeting.")
+    audio_base64: str = Field(..., description="Base64-encoded WAV audio data (minimum 4.5s recommended).")
+    prompt_text: str = Field(..., description="Pre-transcribed text of the audio sample from STT.")
+    sample_rate: int = Field(default=24000, description="Sample rate of the audio data.")
+
+
+@app.post("/v1/voices/register_speaker")
+async def register_speaker_endpoint(req: SpeakerRegisterRequest):
+    """
+    Register or progressively refine a meeting speaker:
+    - If duration >= 4.5s: enrolled into F5-TTS Flow Matching cloner with prompt_text.
+    - If duration < 4.5s: enrolled into instant Supertonic fallback preset.
+    """
+    import base64
+    raw_bytes = base64.b64decode(req.audio_base64)
+    with io.BytesIO(raw_bytes) as buf:
+        audio_data, sr = sf.read(buf, dtype="float32")
+
+    if audio_data.ndim > 1:
+        audio_data = audio_data.mean(axis=-1)
+
+    clean_audio = clean_vocal_prompt(audio_data, sample_rate=sr)
+
+    profile = register_meeting_speaker(
+        store=default_store,
+        speaker_id=req.speaker_id,
+        audio=clean_audio,
+        prompt_text=req.prompt_text,
+        sample_rate=sr
+    )
+
+    return {
+        "status": "success",
+        "speaker_id": profile.speaker_id,
+        "use_fallback": profile.use_fallback,
+        "fallback_preset": profile.fallback_preset,
+        "duration_sec": profile.duration_sec,
+        "engine": "supertonic" if profile.use_fallback else "f5-tts"
     }
 
 
