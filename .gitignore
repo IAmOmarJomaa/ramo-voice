@@ -53,3 +53,9 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+
+# Environment & Injected Secrets
+.env
+.env.*
+serve_ramo_injected.py
+
