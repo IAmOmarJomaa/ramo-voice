@@ -8,11 +8,13 @@ Supports dual execution:
 2. Asynchronous HTTP/WS microservice network dispatch.
 """
 
+from __future__ import annotations
+
 import asyncio
 import base64
 import io
 import logging
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 import numpy as np
 
 # In-process sovereign microservice engines for zero-socket latency
