@@ -52,13 +52,17 @@ def main():
 
     # 2. Fetch/Update Codebase if in Colab scratch directory
     if os.path.exists("/content") and not os.path.exists("services/gateway"):
-        print("\n[2/5] Fetching ramo-engine codebase...", flush=True)
+        branch = os.environ.get("RAMO_BRANCH", "v2-omni-node")
+        print(f"\n[2/5] Fetching ramO_audio codebase (branch: {branch})...", flush=True)
         if github_token:
-            run_cmd(f"git clone --depth 1 https://oauth2:{github_token}@github.com/IAmOmarJomaa/ramo-engine.git /content/ramo-engine", check=False)
+            tarball_cmd = f"mkdir -p ramO_audio && curl -sL -H 'Authorization: token {github_token}' -H 'User-Agent: Mozilla/5.0' https://api.github.com/repos/IAmOmarJomaa/ramO_audio/tarball/{branch} | tar -xz -C ramO_audio --strip-components=1"
+            res = subprocess.run(tarball_cmd, shell=True)
+            if res.returncode != 0 or not os.path.exists("ramO_audio/services"):
+                run_cmd(f"git clone --depth 1 --branch {branch} --single-branch https://oauth2:{github_token}@github.com/IAmOmarJomaa/ramO_audio.git ramO_audio", check=False)
         else:
-            run_cmd("git clone --depth 1 https://github.com/IAmOmarJomaa/ramo-engine.git /content/ramo-engine", check=False)
-        if os.path.exists("/content/ramo-engine"):
-            os.chdir("/content/ramo-engine")
+            run_cmd(f"git clone --depth 1 --branch {branch} --single-branch https://github.com/IAmOmarJomaa/ramO_audio.git ramO_audio", check=False)
+        if os.path.exists("ramO_audio"):
+            os.chdir("ramO_audio")
 
     # 3. High-Speed Model Caching
     if hf_token:
