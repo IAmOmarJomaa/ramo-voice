@@ -11,18 +11,23 @@ echo "======================================================================"
 echo "🚀 Starting Sovereign ramO Engine Multi-Service Swarm on Colab T4"
 echo "======================================================================"
 
+# 0. Host RAM Protection: Provision 8GB Swap Space (12.7GB RAM + 8GB SWAP = 20.7GB total system memory)
+echo "💾 [0/7] Provisioning 8GB Swap space for Host RAM..."
+test -f /swapfile || (sudo fallocate -l 8G /swapfile 2>/dev/null || sudo dd if=/dev/zero of=/swapfile bs=1M count=8192 status=none) && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile || true
+swapon --show || free -h || true
+
 # 1. GPU & VRAM Diagnostics
 if command -v nvidia-smi &> /dev/null; then
-    echo "🎮 GPU Detected:"
-    nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv,noheader
+    echo "🎮 [1/7] NVIDIA GPU Detected:"
+    nvidia-smi --query-gpu=name,memory.total,memory.free,driver_version --format=csv,noheader
 else
     echo "⚠️ Warning: No NVIDIA GPU detected. Running in CPU-only mode."
 fi
 
-# 2. Dependency Installations
-echo "📦 Installing neural dependencies..."
-python -m pip install --quiet --upgrade pip
-python -m pip install --quiet \
+# 2. Dependency Installations via High-Speed uv
+echo "📦 [2/7] Installing neural dependencies via high-speed parallel uv..."
+python -m pip install --quiet uv || true
+uv pip install --system \
     "fastapi>=0.115.0" \
     "uvicorn[standard]>=0.30.0" \
     "websockets>=12.0" \
@@ -33,11 +38,19 @@ python -m pip install --quiet \
     "httpx>=0.27.0" \
     "python-multipart>=0.0.9" \
     "faster-whisper>=1.0.0" \
-    "onnxruntime>=1.17.0"
+    "onnxruntime>=1.17.0" \
+    "huggingface_hub[cli,hf_transfer]" \
+    "hf_transfer" || true
 
-# 2b. Tailscale Mesh Setup (Userspace mode for Google Colab)
+# 2b. VRAM Fragmentation & Memory Allocator Flags
+export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True,max_split_size_mb:128"
+export CT2_CUDA_CACHING_ALLOCATOR_CONFIG="8,3,7,209715200"
+export MALLOC_TRIM_THRESHOLD_="65536"
+export MALLOC_MMAP_THRESHOLD_="65536"
+
+# 2c. Tailscale Mesh Setup (Userspace mode for Google Colab)
 if [ -n "${TAILSCALE_AUTHKEY:-}" ]; then
-    echo "🌐 Initializing Tailscale Mesh Network..."
+    echo "🌐 [3/7] Initializing Tailscale Mesh Network..."
     if ! command -v tailscale &> /dev/null; then
         curl -fsSL https://tailscale.com/install.sh | sh > /dev/null 2>&1 || true
     fi
@@ -52,11 +65,10 @@ else
     TS_IP="127.0.0.1"
 fi
 
-# 2c. High-Speed HuggingFace Weights Caching
+# 2d. High-Speed HuggingFace Weights Caching
 if [ -n "${HF_TOKEN:-}" ]; then
     echo "⚡ High-Speed HuggingFace Download Engine Enabled (hf_transfer)..."
     export HF_HUB_ENABLE_HF_TRANSFER=1
-    python -m pip install --quiet "huggingface_hub[cli,hf_transfer]" hf_transfer || true
 fi
 
 # Make log directory
@@ -103,21 +115,25 @@ PORT=50000 PYTHONPATH="${GATEWAY_PATH}" nohup python -m uvicorn ramo_gateway.ser
     --host 0.0.0.0 --port 50000 > logs/gateway_boot.log 2>&1 &
 PID_GW=$!
 
-# 4. Health Check Poller
+# 4. Active Health Check Readiness Gate (Poll up to 60s for models to warm up)
 echo ""
 echo "⏳ Waiting for microservices to warm up and verify health..."
-sleep 5
 
-SERVICES=(
-    "50054:Enhancement:ramo_clean"
-    "50051:STT:ramo_listen"
-    "50052:Diarization:ramo_speaker"
-    "50053:Translation:ramo_translate"
-    "50055:TTS:ramo_voice"
-    "50000:Gateway:ramo_gateway"
-)
-
-ALL_HEALTHY=true
+for attempt in {1..30}; do
+    ALL_HEALTHY=true
+    for item in "${SERVICES[@]}"; do
+        IFS=":" read -r port name pkg <<< "$item"
+        HEALTH_RES=$(curl -s "http://localhost:${port}/health" || true)
+        if [[ "$HEALTH_RES" != *"healthy"* ]]; then
+            ALL_HEALTHY=false
+        fi
+    done
+    if [ "$ALL_HEALTHY" = true ]; then
+        echo "  🎉 All services reported healthy on attempt ${attempt}!"
+        break
+    fi
+    sleep 2
+done
 
 for item in "${SERVICES[@]}"; do
     IFS=":" read -r port name pkg <<< "$item"
