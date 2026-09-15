@@ -95,12 +95,20 @@ async def _handle_audio_cut(
     trace_id: str,
 ):
     """Processes a discrete speech chunk through the full neural pipeline."""
+    duration_s = len(pcm_bytes) / 32000.0
+    logger.info(
+        f"✂️ [CHRONOS] Trace: {trace_id} | Cut: {'FINAL' if is_final else 'PROVISIONAL'} "
+        f"| Duration: {duration_s:.2f}s ({len(pcm_bytes)} bytes) | Source: {sess.source}"
+    )
+
     # 0. Audio cleaning
     audio_f32, _ = dispatcher.clean_audio_pcm(pcm_bytes)
+    logger.debug(f"🧼 [CLEAN] Filtered {len(audio_f32)} samples (16kHz float32) via HPF/AGC")
 
     # 1. State machine barge-in check
     interrupted = sm.on_speech_start()
     if interrupted:
+        logger.info(f"⚡ [BARGE_IN] Speech detected during assistant turn — sending interrupt")
         await websocket.send_json({"type": "interrupt"})
 
     # 2. Speaker identification & inheritance
@@ -108,6 +116,7 @@ async def _handle_audio_cut(
     speaker_id = dispatcher.identify_speaker(audio_f32, last_known=last_spk)
     sess.set_last_known_speaker(speaker_id)
     is_owner = sess.source == "mic"
+    logger.info(f"👥 [DIAR_OUT] Speaker: {speaker_id} | Owner: {is_owner}")
 
     # 3. Speech-to-text
     stt_res = await dispatcher.process_stt(audio_f32)
@@ -115,6 +124,13 @@ async def _handle_audio_cut(
 
     if not transcript_text:
         return
+
+    emotion_tag = stt_res.get("emotion", "<|NEUTRAL|>")
+    stt_lang = stt_res.get("language", "en")
+    word_count = len(stt_res.get("words", []))
+    logger.info(
+        f"👂 [STT_OUT] '{transcript_text}' | Lang: {stt_lang} | Words: {word_count} | Emotion: {emotion_tag}"
+    )
 
     # 4. Emit transcript frame (matching Bridge-Tauri)
     timestamp_str = time.strftime("%I:%M %p").lstrip("0")
@@ -125,11 +141,11 @@ async def _handle_audio_cut(
         "speaker": speaker_id,
         "is_owner": is_owner,
         "is_final": is_final,
-        "language": stt_res.get("language", "en"),
+        "language": stt_lang,
         "source": sess.source,
         "words": stt_res.get("words", []),
         "timestamp": timestamp_str,
-        "emotion": stt_res.get("emotion", "<|NEUTRAL|>"),
+        "emotion": emotion_tag,
         "event": "<|Speech|>",
     }
     await websocket.send_json(transcript_frame)
@@ -139,7 +155,7 @@ async def _handle_audio_cut(
 
     # 5. Translation
     target_lang = sess.target_language
-    source_lang = stt_res.get("language", "en")
+    source_lang = stt_lang
     translated_text, _ = await dispatcher.translate_text(
         text=transcript_text,
         source_lang=source_lang,
@@ -149,6 +165,9 @@ async def _handle_audio_cut(
     )
 
     if translated_text:
+        logger.info(
+            f"🌐 [TRANS_OUT] [{source_lang} -> {target_lang}] '{transcript_text}' -> '{translated_text}'"
+        )
         await websocket.send_json(
             {
                 "type": "translation_result",
@@ -166,6 +185,7 @@ async def _handle_audio_cut(
     # 6. Action items
     action = dispatcher.check_action_item(transcript_text)
     if action:
+        logger.info(f"📋 [ACTION_ITEM] Detected action '{action}' in transcript '{transcript_text}'")
         await websocket.send_json(
             {
                 "type": "action_item",
@@ -189,6 +209,10 @@ async def _handle_audio_cut(
             engine_type=sess.tts_engine,
         )
         if len(tts_pcm) > 0:
+            tts_dur = len(tts_pcm) / (2.0 * tts_sr)
+            logger.info(
+                f"🔊 [TTS_OUT] Synthesized {len(tts_pcm)} bytes ({tts_dur:.2f}s) @ {tts_sr}Hz via {sess.tts_engine}"
+            )
             await websocket.send_json(
                 {
                     "type": "tts_audio",
@@ -244,6 +268,7 @@ async def websocket_stream_endpoint(websocket: WebSocket):
             # Binary audio input
             if "bytes" in msg and msg["bytes"]:
                 pcm_bytes = msg["bytes"]
+                logger.debug(f"🎙️ [AUDIO_IN] Received {len(pcm_bytes)} bytes PCM audio from {sess.source}")
                 cuts = chronos.add_audio(pcm_bytes)
                 for cut in cuts:
                     await _handle_audio_cut(websocket, sess, sm, cut.pcm_data, cut.is_final, trace_id)
@@ -261,6 +286,7 @@ async def websocket_stream_endpoint(websocket: WebSocket):
                 raw_text = msg["text"]
                 try:
                     data = json.loads(raw_text)
+                    logger.debug(f"📩 [WS_TEXT] Control frame: {data.get('type') or data.get('action')}")
                 except Exception:
                     continue
 

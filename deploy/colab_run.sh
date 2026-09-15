@@ -35,6 +35,30 @@ python -m pip install --quiet \
     "faster-whisper>=1.0.0" \
     "onnxruntime>=1.17.0"
 
+# 2b. Tailscale Mesh Setup (Userspace mode for Google Colab)
+if [ -n "${TAILSCALE_AUTHKEY:-}" ]; then
+    echo "🌐 Initializing Tailscale Mesh Network..."
+    if ! command -v tailscale &> /dev/null; then
+        curl -fsSL https://tailscale.com/install.sh | sh > /dev/null 2>&1 || true
+    fi
+    tailscaled --tun=userspace-networking --socks5-server=localhost:1055 &
+    sleep 2
+    tailscale up --authkey="${TAILSCALE_AUTHKEY}" --hostname=ramo-gpu --accept-routes || true
+    TS_IP=$(tailscale ip -4 2>/dev/null || echo "127.0.0.1")
+    echo "  ✅ Tailscale connected as 'ramo-gpu' (Mesh IP: ${TS_IP})"
+    echo "  🔗 Permanent MagicDNS WebSocket: ws://ramo-gpu:50000/v1/stream"
+else
+    echo "  ⚠️ TAILSCALE_AUTHKEY not set. Listening on local ports only."
+    TS_IP="127.0.0.1"
+fi
+
+# 2c. High-Speed HuggingFace Weights Caching
+if [ -n "${HF_TOKEN:-}" ]; then
+    echo "⚡ High-Speed HuggingFace Download Engine Enabled (hf_transfer)..."
+    export HF_HUB_ENABLE_HF_TRANSFER=1
+    python -m pip install --quiet "huggingface_hub[cli,hf_transfer]" hf_transfer || true
+fi
+
 # Make log directory
 mkdir -p logs
 
@@ -134,3 +158,87 @@ if [ "$ALL_HEALTHY" = true ]; then
 else
     echo "⚠️ One or more services failed health verification. Check logs for details."
 fi
+
+# 6. Colab Foreground Keep-Alive & Telemetry Supervisor Loop
+echo ""
+echo "======================================================================"
+echo "🛡️ Colab Keep-Alive Supervisor Active: Tailing logs & emitting heartbeats"
+echo "   MagicDNS Stream: ws://ramo-gpu:50000/v1/stream"
+echo "   (Press Ctrl+C to terminate the cluster)"
+echo "======================================================================"
+
+python3 - << 'EOF'
+import os
+import time
+import sys
+
+log_files = {
+    "GW": "logs/ramo_gateway.log",
+    "CLEAN": "logs/ramo_clean.log",
+    "STT": "logs/ramo_listen.log",
+    "DIAR": "logs/ramo_speaker.log",
+    "TRANS": "logs/ramo_translate.log",
+    "TTS": "logs/ramo_voice.log",
+}
+
+handles = {}
+last_heartbeat = 0
+
+def get_telemetry():
+    vram_str = "VRAM: N/A"
+    try:
+        import subprocess
+        out = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=memory.used,memory.total,temperature.gpu,utilization.gpu", "--format=csv,noheader,nounits"],
+            text=True
+        ).strip().split(",")
+        if len(out) >= 4:
+            used, total, temp, util = [x.strip() for x in out[:4]]
+            vram_str = f"GPU VRAM: {int(used)/1024:.1f}GB / {int(total)/1024:.1f}GB ({int(used)*100//int(total)}%) | Util: {util}% | Temp: {temp}°C"
+    except Exception:
+        pass
+    
+    ram_str = "RAM: N/A"
+    try:
+        with open("/proc/meminfo", "r") as f:
+            lines = f.readlines()
+        mem = {}
+        for l in lines:
+            parts = l.split(":")
+            if len(parts) == 2:
+                mem[parts[0].strip()] = parts[1].strip()
+        tot_kb = float(mem.get("MemTotal", "0 kB").split()[0])
+        avail_kb = float(mem.get("MemAvailable", "0 kB").split()[0])
+        ram_str = f"RAM: {(tot_kb - avail_kb)/(1024**2):.1f}GB / {tot_kb/(1024**2):.1f}GB"
+    except Exception:
+        pass
+    return f"{vram_str} | {ram_str}"
+
+try:
+    while True:
+        now = time.time()
+        # 30-second Heartbeat
+        if now - last_heartbeat >= 30.0:
+            telem = get_telemetry()
+            timestamp = time.strftime("%H:%M:%S")
+            print(f"💓 [HEARTBEAT {timestamp}] Colab T4 Active | {telem} | MagicDNS: ws://ramo-gpu:50000/v1/stream", flush=True)
+            last_heartbeat = now
+        
+        # Real-time Log Tailing
+        for tag, path in log_files.items():
+            if tag not in handles and os.path.exists(path):
+                h = open(path, "r", encoding="utf-8", errors="replace")
+                h.seek(0, 2)  # Seek to end of file
+                handles[tag] = h
+            if tag in handles:
+                line = handles[tag].readline()
+                while line:
+                    stripped = line.strip()
+                    if stripped:
+                        print(f"[{tag}] {stripped}", flush=True)
+                    line = handles[tag].readline()
+        time.sleep(0.5)
+except KeyboardInterrupt:
+    print("\nShutting down Sovereign cluster...", flush=True)
+EOF
+
