@@ -1,0 +1,58 @@
+{
+  "dataset": "Duke University COVID-19 / Flu Classroom Webinar",
+  "source_video": "C:\\Users\\MSI\\Downloads\\Video Project 45.mp4",
+  "audio_clip": "tests/fixtures/benchmark_turn_taking_3min.wav",
+  "duration_sec": 180.0,
+  "sample_rate": 16000,
+  "channels": 1,
+  "num_speakers": 3,
+  "speakers": [
+    {
+      "id": "speaker_1",
+      "name": "Dr. Kenisha Zimmerman",
+      "role": "Host / Introducer",
+      "gender": "Female"
+    },
+    {
+      "id": "speaker_2",
+      "name": "Dr. Danny Benjamin",
+      "role": "Co-Host / Housekeeping Moderator",
+      "gender": "Male"
+    },
+    {
+      "id": "speaker_3",
+      "name": "Dr. Mike Smith",
+      "role": "Panelist / Infectious Disease Presenter",
+      "gender": "Male"
+    }
+  ],
+  "turns": [
+    {
+      "turn_id": 1,
+      "speaker_id": "speaker_1",
+      "speaker_name": "Dr. Kenisha Zimmerman",
+      "start_sec": 6.0,
+      "end_sec": 26.0,
+      "handoff_to": "Dr. Danny Benjamin",
+      "text": "Good evening, I'm Dr. Kenisha Zimmerman. I am really pleased to welcome you to COVID-19 in the classroom tonight. We'll be talking about COVID-19 and the flu. We have Dr. Mike Smith, Dr. David Weber, and Dr. Ibukun Akinboyo who'll be presenting and serving as our panelists. And as usual, I am very pleased to share the stage with Dr. Danny Benjamin. Danny?"
+    },
+    {
+      "turn_id": 2,
+      "speaker_id": "speaker_2",
+      "speaker_name": "Dr. Danny Benjamin",
+      "start_sec": 26.0,
+      "end_sec": 108.0,
+      "handoff_to": "Dr. Mike Smith",
+      "text": "Thanks Kenisha. So just as a reminder for folks about format, we will have our panelists present during the first few minutes of the discussion today. Then we'll take questions from folks. You'll recognize some of your questions from prior webinars for those of you who've been typing in questions, because if we don't get to your questions during a webinar itself, we'll push them out to either a frequently asked questions document or put them into a future webinar. We'd like to get as many of your questions during the webinars as possible, so please go ahead and type those in as we go along. The link to the YouTube livestream is going to continue so that you can view this webinar again at your convenience. That's also going to be located for many of you within your school districts, and these materials will be on the ABC website next week. I think with next slide we can go to. Don't forget to fill out your post-webinar survey. For many of you, that's how you'll get credit for your continuing education credits that many of your school districts are offering you for participating in this. Go ahead next slide please. And I think it's Dr. Smith to start us off. Mike?"
+    },
+    {
+      "turn_id": 3,
+      "speaker_id": "speaker_3",
+      "speaker_name": "Dr. Mike Smith",
+      "start_sec": 108.0,
+      "end_sec": 180.0,
+      "handoff_to": "Dr. Ibukun Akinboyo",
+      "text": "Yep, thank you. So I want to start with some basics. What is flu, or influenza? Flu is a common virus that infects the respiratory tract. It's actually very common, somewhere between 40 to 50 million Americans get infected each year. The good news is that it rarely requires medical labs or imaging, although you can get quite sick. We'll go through some of those numbers here in a little bit. If you are unfortunate enough to get infected, your symptoms can last several days or weeks. Now the good news is, unlike COVID, this is a vaccine-preventable disease. However, like COVID, it is transmitted through droplet exposure. Next slide please. So I mentioned some of the numbers. These are data from the last influenza season. So every year, flu starts in the late fall and goes through late winter, early spring. So looking at numbers from October 2019 through April 2020, the CDC estimates 39 to 56 million illnesses due to flu. Of those, 18 to 26 million medical visits, again most of these occur on the outpatient side. You can see 410 to 740,000 hospitalizations due to flu."
+    }
+  ]
+}

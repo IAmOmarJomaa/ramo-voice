@@ -47,7 +47,7 @@ class PipelineDispatcher:
         self.stt = SenseVoiceEngine(sample_rate=sample_rate)
 
         # 2. Diarization
-        self.clusterer = SpeakerClusterer(similarity_threshold=0.75, momentum=0.85)
+        self.clusterer = SpeakerClusterer(similarity_threshold=0.62, momentum=0.70)
         self.segmenter = AudioSegmenter(sample_rate=sample_rate)
 
         # 3. Translation & Meeting Intelligence
@@ -86,11 +86,13 @@ class PipelineDispatcher:
         return await self.stt.transcribe(audio_f32, sample_rate=self.sample_rate)
 
     def identify_speaker(self, audio_f32: np.ndarray, last_known: str = "Unknown") -> str:
-        """Extract 512-dim CampPlus embedding and match/update cluster centroid."""
+        """Extract CampPlus embedding and match/update cluster centroid."""
         if len(audio_f32) < int(0.2 * self.sample_rate):
+            logger.debug(f"👥 [DIAR] Audio too short ({len(audio_f32)} samples < 0.2s) - inheriting '{last_known}'")
             return last_known if last_known != "Unknown" else "Speaker 1"
         emb = self.segmenter.extract_embedding(audio_f32)
         spk_id = self.clusterer.assign_or_update(emb, is_overlap=False)
+        logger.info(f"👥 [DIAR_IDENTIFY] Audio chunk ({len(audio_f32)/self.sample_rate:.2f}s) -> Assigned '{spk_id}' (prev: '{last_known}')")
         return spk_id
 
     async def translate_text(

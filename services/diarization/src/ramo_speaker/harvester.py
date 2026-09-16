@@ -15,10 +15,13 @@ from __future__ import annotations
 
 import base64
 import io
+import logging
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any
 import numpy as np
 import soundfile as sf
+
+logger = logging.getLogger("ramo_speaker.harvester")
 
 
 @dataclass
@@ -69,7 +72,9 @@ class VoiceprintHarvester:
     def add_turn(self, turn: SpeakerTurn) -> None:
         """Add a speech turn. Excludes turns marked as crosstalk/overlap."""
         if turn.is_overlap:
-            # Overlapping turns cannot be used for clean voice cloning
+            logger.info(
+                f"[HARVESTER] ⚠️ Excluded overlapping turn from voiceprint harvesting for '{turn.speaker_id}' ({turn.duration_sec:.2f}s)"
+            )
             return
 
         audio = turn.audio.astype(np.float32)
@@ -77,7 +82,7 @@ class VoiceprintHarvester:
             audio = audio.mean(axis=-1)
 
         # Normalize audio peak
-        max_abs = np.max(np.abs(audio))
+        max_abs = np.max(np.abs(audio)) if len(audio) > 0 else 0.0
         if max_abs > 0:
             audio = (audio / max_abs) * 0.95
 
@@ -89,6 +94,24 @@ class VoiceprintHarvester:
         self._speaker_audio[spk_id].append(audio)
         if turn.transcript:
             self._speaker_transcripts[spk_id].append(turn.transcript.strip())
+
+        total_samples = sum(len(c) for c in self._speaker_audio[spk_id])
+        total_sec = total_samples / self.target_sr
+        turns_count = len(self._speaker_audio[spk_id])
+
+        logger.info(
+            f"[HARVESTER] 🎙️ Audio turn added for '{spk_id}': +{turn.duration_sec:.2f}s | "
+            f"Total accumulated: {total_sec:.2f}s / {self.tier2_threshold_sec:.1f}s ({turns_count} turns)"
+        )
+
+        if total_sec >= self.tier2_threshold_sec:
+            logger.info(
+                f"[HARVESTER] 🚀 '{spk_id}' achieved TIER 2 ({total_sec:.2f}s >= {self.tier2_threshold_sec:.1f}s)! High-Fidelity Profile Ready!"
+            )
+        elif total_sec >= self.tier1_threshold_sec:
+            logger.info(
+                f"[HARVESTER] 🚀 '{spk_id}' achieved TIER 1 ({total_sec:.2f}s >= {self.tier1_threshold_sec:.1f}s)! INSTANT ZERO-SHOT CLONING READY!"
+            )
 
     def has_candidate(self, speaker_id: str) -> bool:
         return speaker_id in self._speaker_audio and len(self._speaker_audio[speaker_id]) > 0

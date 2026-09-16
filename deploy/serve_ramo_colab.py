@@ -127,6 +127,13 @@ def main():
         'uv pip install --system "fastapi>=0.115.0" "uvicorn[standard]>=0.30.0" "websockets>=12.0" "soundfile>=0.12.1" "scipy>=1.13.0" "numpy>=1.26.0,<2.0.0" "pydantic>=2.8.0" "httpx>=0.27.0" "python-multipart>=0.0.9" "faster-whisper>=1.0.0" "onnxruntime>=1.17.0" "huggingface_hub[cli,hf_transfer]" hf_transfer'
     )
 
+    # Provision CampPlus Diarization Model
+    print("  🧠 Provisioning 3D-CAM++ (CampPlus) Diarization ONNX weights...", flush=True)
+    run_cmd(
+        "mkdir -p models && (test -f models/campplus.onnx || wget -q -c -O models/campplus.onnx https://huggingface.co/Luigi/campplus-zh-en-onnx/resolve/main/campplus_zh_en_fp32.onnx)",
+        check=False
+    )
+
     # 6. Memory Allocator & Environment Flags
     worker_env = os.environ.copy()
     worker_env["PYTHONUNBUFFERED"] = "1"

@@ -21,7 +21,7 @@ from ramo_common.logging import setup_service_logging, tail_service_log
 
 logger = setup_service_logging("ramo_speaker")
 
-clusterer = SpeakerClusterer(similarity_threshold=0.75, momentum=0.85)
+clusterer = SpeakerClusterer(similarity_threshold=0.62, momentum=0.70)
 segmenter = AudioSegmenter(sample_rate=16000)
 harvester = VoiceprintHarvester(min_duration_sec=2.5, target_sr=16000)
 
@@ -65,10 +65,16 @@ async def diarize_audio(file: UploadFile = File(...)):
     with io.BytesIO(contents) as buf:
         audio_data, sr = sf.read(buf, dtype="float32")
 
+    duration_s = len(audio_data) / sr if sr > 0 else 0.0
+    logger.info(
+        f"📥 [DIAR_REQ] /v1/diarize received '{file.filename}' ({len(contents)} bytes, {duration_s:.2f}s @ {sr}Hz)"
+    )
+
     turns = segmenter.segment_turns(audio_data)
     results = []
 
-    for start, end, chunk in turns:
+    for idx, (start, end, chunk) in enumerate(turns):
+        logger.info(f"--- [DIAR_TURN {idx+1}/{len(turns)}] [{start:.2f}s -> {end:.2f}s] ({end-start:.2f}s) ---")
         embedding = segmenter.extract_embedding(chunk)
         spk_id = clusterer.assign_or_update(embedding, is_overlap=False)
         results.append({
@@ -95,9 +101,15 @@ async def harvest_voiceprint(file: UploadFile = File(...)):
     with io.BytesIO(contents) as buf:
         audio_data, sr = sf.read(buf, dtype="float32")
 
+    duration_s = len(audio_data) / sr if sr > 0 else 0.0
+    logger.info(
+        f"📥 [HARVEST_REQ] /v1/harvest/voiceprint received '{file.filename}' ({len(contents)} bytes, {duration_s:.2f}s @ {sr}Hz)"
+    )
+
     turns = segmenter.segment_turns(audio_data)
 
-    for start, end, chunk in turns:
+    for idx, (start, end, chunk) in enumerate(turns):
+        logger.info(f"--- [HARVEST_TURN {idx+1}/{len(turns)}] [{start:.2f}s -> {end:.2f}s] ({end-start:.2f}s) ---")
         embedding = segmenter.extract_embedding(chunk)
         spk_id = clusterer.assign_or_update(embedding, is_overlap=False)
         harvester.add_turn(SpeakerTurn(

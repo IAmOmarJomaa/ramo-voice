@@ -36,6 +36,7 @@ htmlcov/
 models/
 *.wav
 !tests/fixtures/*.wav
+tests/fixtures/output_*.wav
 *.mp3
 *.flac
 *.onnx
