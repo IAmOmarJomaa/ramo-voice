@@ -224,6 +224,10 @@ class LocalLLMEngine(BaseTranslationEngine):
                         device_map="auto" if self.device == "cuda" else None,
                         trust_remote_code=True,
                     )
+                    if hasattr(model, "tie_weights"):
+                        model.tie_weights()
+                    if hasattr(model, "lm_head") and hasattr(model, "model") and hasattr(model.model, "embed_tokens"):
+                        model.lm_head.weight = model.model.embed_tokens.weight
                     return model, tok
 
                 loop = asyncio.get_running_loop()
@@ -304,11 +308,18 @@ class LocalLLMEngine(BaseTranslationEngine):
                     inputs = self._tokenizer(prompt, return_tensors="pt")
                     if self.device == "cuda":
                         inputs = {k: v.to(self._model.device) for k, v in inputs.items()}
+                    eos_ids = [self._tokenizer.eos_token_id] if self._tokenizer.eos_token_id else []
+                    im_end_id = self._tokenizer.convert_tokens_to_ids("<|im_end|>")
+                    if isinstance(im_end_id, int) and im_end_id not in eos_ids:
+                        eos_ids.append(im_end_id)
+
                     with torch.inference_mode():
                         outputs = self._model.generate(
                             **inputs,
                             max_new_tokens=128,
                             do_sample=False,
+                            eos_token_id=eos_ids,
+                            pad_token_id=self._tokenizer.pad_token_id or eos_ids[0],
                         )
                     gen_text = self._tokenizer.decode(outputs[0][inputs["input_ids"].shape[1]:], skip_special_tokens=False)
                     translated, _ = self.parse_llm_output(gen_text, fallback_text=clean_input)
