@@ -134,6 +134,13 @@ def main():
         check=False
     )
 
+    # Pre-cache Qwen Neural Translation Model
+    print("  🧠 Pre-caching Qwen-2.5-1.5B Translation Model weights...", flush=True)
+    run_cmd(
+        'python -c "import torch; from transformers import AutoModelForCausalLM, AutoTokenizer; AutoTokenizer.from_pretrained(\'Qwen/Qwen2.5-1.5B-Instruct\'); AutoModelForCausalLM.from_pretrained(\'Qwen/Qwen2.5-1.5B-Instruct\', torch_dtype=torch.float16)"',
+        check=False
+    )
+
     # 6. Memory Allocator & Environment Flags
     worker_env = os.environ.copy()
     worker_env["PYTHONUNBUFFERED"] = "1"
