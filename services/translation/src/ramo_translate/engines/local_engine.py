@@ -186,24 +186,43 @@ class LocalLLMEngine(BaseTranslationEngine):
         if not raw_output:
             return fallback_text, None
 
-        # 1. Try finding JSON block
-        json_match = re.search(r'\{[^{}]*"translated_text"[^{}]*\}', raw_output, re.DOTALL)
-        if json_match:
+        # 1. Direct regex extraction for "translated_text": "..."
+        trans_match = re.search(r'"translated_text"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"', raw_output)
+        if trans_match:
             try:
-                data = json.loads(json_match.group(0))
-                trans = data.get("translated_text", "").strip()
-                action = data.get("detected_action_item")
-                if trans:
-                    return trans, action
+                trans = json.loads(f'"{trans_match.group(1)}"')
             except Exception:
-                pass
+                trans = trans_match.group(1)
 
-        # 2. Raw text fallback
+            action = None
+            act_match = re.search(r'"detected_action_item"\s*:\s*"([a-zA-Z0-9_]+)"', raw_output)
+            if act_match:
+                action = act_match.group(1)
+
+            if trans.strip():
+                return trans.strip(), action
+
+        # 2. Try standard json.loads if entire response has a JSON object
+        try:
+            bracket_idx = raw_output.find('{')
+            if bracket_idx != -1:
+                end_idx = raw_output.rfind('}')
+                if end_idx > bracket_idx:
+                    data = json.loads(raw_output[bracket_idx:end_idx+1])
+                    trans = data.get("translated_text", "").strip()
+                    action = data.get("detected_action_item")
+                    if trans:
+                        return trans, action
+        except Exception:
+            pass
+
+        # 3. Clean raw text fallback
         clean = raw_output.strip().strip('"\'`')
         clean = re.sub(r'^(?:Speaker\s+[A-Z0-9_]+|\[S_[A-Z0-9_]+\]|\w+)\s*:\s*', '', clean, flags=re.IGNORECASE).strip()
         clean = re.sub(r'<\|im_end\|>.*', '', clean, flags=re.DOTALL).strip()
-        clean = clean.split('\n')[0].strip()
-        return (clean if clean else fallback_text), None
+        clean = clean.strip('{} \t\r\n')
+        lines = [line.strip() for line in clean.splitlines() if line.strip()]
+        return (lines[0] if lines else fallback_text), None
 
     async def load(self) -> None:
         if self.is_loaded:
