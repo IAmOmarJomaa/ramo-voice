@@ -1,4 +1,4 @@
-"b""
+"""
 tests/test_translation_standalone.py
 =====================================
 Standalone verification harness for ramO Translation & Intelligence Engine.

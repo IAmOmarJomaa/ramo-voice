@@ -214,11 +214,13 @@ class LocalLLMEngine(BaseTranslationEngine):
         if self.load_neural:
             try:
                 def _load():
+                    import torch
                     from transformers import AutoModelForCausalLM, AutoTokenizer
                     tok = AutoTokenizer.from_pretrained(self.model_id, trust_remote_code=True)
+                    target_dtype = torch.float16 if self.device == "cuda" else torch.float32
                     model = AutoModelForCausalLM.from_pretrained(
                         self.model_id,
-                        torch_dtype="auto",
+                        torch_dtype=target_dtype,
                         device_map="auto" if self.device == "cuda" else None,
                         trust_remote_code=True,
                     )
@@ -296,22 +298,26 @@ class LocalLLMEngine(BaseTranslationEngine):
         # 1. Neural model generation if loaded
         if self._model is not None and self._tokenizer is not None:
             try:
-                prompt = self._format_apc_prompt(clean_input, source_lang, target_lang, context_str)
+                prompt = self.format_translation_prompt(clean_input, source_lang, target_lang, sliding_window=context_str)
                 def _infer():
-                    inputs = self._tokenizer(prompt, return_tensors="pt").to(self._model.device)
-                    outputs = self._model.generate(
-                        **inputs,
-                        max_new_tokens=128,
-                        temperature=0.3,
-                        do_sample=False,
-                    )
-                    gen_text = self._tokenizer.decode(outputs[0][inputs.input_ids.shape[1]:], skip_special_tokens=True)
-                    return self._clean_output(gen_text)
+                    import torch
+                    inputs = self._tokenizer(prompt, return_tensors="pt")
+                    if self.device == "cuda":
+                        inputs = {k: v.to(self._model.device) for k, v in inputs.items()}
+                    with torch.inference_mode():
+                        outputs = self._model.generate(
+                            **inputs,
+                            max_new_tokens=128,
+                            do_sample=False,
+                        )
+                    gen_text = self._tokenizer.decode(outputs[0][inputs["input_ids"].shape[1]:], skip_special_tokens=False)
+                    translated, _ = self.parse_llm_output(gen_text, fallback_text=clean_input)
+                    return translated
 
                 loop = asyncio.get_running_loop()
                 return await loop.run_in_executor(None, _infer)
             except Exception as e:
-                logger.error(f"Neural generation failed: {e}. Falling back to linguistic mapping.")
+                logger.error(f"Neural generation failed: {e}. Falling back to linguistic mapping.", exc_info=True)
 
         # 2. Comprehensive Conversational Linguistic Mapping Dictionary
         phrase_lookup: Dict[Tuple[str, str], str] = {
