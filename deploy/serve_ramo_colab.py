@@ -124,7 +124,7 @@ def main():
     
     # Pre-pinning and installing core packages in parallel
     run_cmd(
-        'uv pip install --system "fastapi>=0.115.0" "uvicorn[standard]>=0.30.0" "websockets>=12.0" "soundfile>=0.12.1" "scipy>=1.13.0" "numpy>=1.26.0,<2.0.0" "pydantic>=2.8.0" "httpx>=0.27.0" "python-multipart>=0.0.9" "faster-whisper>=1.0.0" "onnxruntime>=1.17.0" "huggingface_hub[cli,hf_transfer]" hf_transfer'
+        'uv pip install --system "fastapi>=0.115.0" "uvicorn[standard]>=0.30.0" "websockets>=12.0" "soundfile>=0.12.1" "scipy>=1.13.0" "numpy>=1.26.0,<2.0.0" "pydantic>=2.8.0" "httpx>=0.27.0" "python-multipart>=0.0.9" "faster-whisper>=1.0.0" "onnxruntime>=1.17.0" "huggingface_hub[cli,hf_transfer]" hf_transfer transformers accelerate'
     )
 
     # Provision CampPlus Diarization Model
@@ -142,6 +142,8 @@ def main():
     worker_env["CT2_CUDA_CACHING_ALLOCATOR_CONFIG"] = "8,3,7,209715200"
     worker_env["MALLOC_TRIM_THRESHOLD_"] = "65536"
     worker_env["MALLOC_MMAP_THRESHOLD_"] = "65536"
+    worker_env["RAMO_LOAD_NEURAL_LLM"] = "1"
+    worker_env["RAMO_LLM_MODEL"] = os.getenv("RAMO_LLM_MODEL", "Qwen/Qwen2.5-1.5B-Instruct")
 
     # Make log directory
     os.makedirs("logs", exist_ok=True)

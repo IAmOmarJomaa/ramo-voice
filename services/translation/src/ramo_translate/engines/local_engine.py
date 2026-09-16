@@ -6,13 +6,58 @@ Designed for 16-token Automatic Prefix Caching (APC) and ~2.0 GB VRAM memory saf
 """
 
 import asyncio
+import json
 import logging
 import os
 import re
-from typing import AsyncIterator, Optional, Dict, Tuple
+from typing import AsyncIterator, Optional, Dict, Tuple, Any
 from .base import BaseTranslationEngine
 
 logger = logging.getLogger("ramo_translate.local_engine")
+
+LANGUAGE_MAPPING: Dict[str, str] = {
+    "en": "English",
+    "fr": "French",
+    "es": "Spanish",
+    "de": "German",
+    "it": "Italian",
+    "ja": "Japanese",
+    "zh": "Chinese (Mandarin)",
+    "ar": "Arabic",
+    "hi": "Hindi",
+    "pt": "Portuguese",
+    "ru": "Russian",
+    "ko": "Korean",
+    "vi": "Vietnamese",
+    "th": "Thai",
+    "id": "Indonesian",
+    "bn": "Bengali",
+    "ur": "Urdu",
+    "fa": "Persian (Farsi)",
+    "tr": "Turkish",
+    "pl": "Polish",
+    "nl": "Dutch",
+    "sv": "Swedish",
+    "fi": "Finnish",
+    "cs": "Czech",
+    "ro": "Romanian",
+    "hu": "Hungarian",
+    "el": "Greek",
+    "he": "Hebrew",
+    "sw": "Swahili",
+    "fra": "French",
+    "spa": "Spanish",
+    "deu": "German",
+    "eng": "English",
+    "ita": "Italian",
+    "jpn": "Japanese",
+    "zho": "Chinese (Mandarin)",
+    "ara": "Arabic",
+    "hin": "Hindi",
+    "por": "Portuguese",
+    "rus": "Russian",
+    "kor": "Korean",
+}
 
 
 class LocalLLMEngine(BaseTranslationEngine):
@@ -33,6 +78,8 @@ class LocalLLMEngine(BaseTranslationEngine):
         self.load_neural = load_neural or (os.getenv("RAMO_LOAD_NEURAL_LLM", "0") == "1")
         self._model = None
         self._tokenizer = None
+        self._vllm = None
+        self.prompt_templates = self._load_prompt_templates()
 
     @staticmethod
     def _has_cuda() -> bool:
@@ -41,6 +88,122 @@ class LocalLLMEngine(BaseTranslationEngine):
             return torch.cuda.is_available()
         except ImportError:
             return False
+
+    def _load_prompt_templates(self) -> Dict[str, Any]:
+        candidates = [
+            os.path.join(os.path.dirname(__file__), "..", "prompts", "prompt_templates.json"),
+            os.path.join(os.path.dirname(__file__), "prompts", "prompt_templates.json"),
+            os.path.join(os.getcwd(), "services", "translation", "src", "ramo_translate", "prompts", "prompt_templates.json"),
+            os.path.join(os.getcwd(), "services", "llm", "prompts", "prompt_templates.json"),
+            os.path.join(r"c:\ramo-audio", "services", "llm", "prompts", "prompt_templates.json"),
+        ]
+        for path in candidates:
+            norm = os.path.normpath(path)
+            if os.path.exists(norm):
+                try:
+                    with open(norm, "r", encoding="utf-8") as f:
+                        templates = json.load(f)
+                    logger.info(f"Loaded {len(templates)} multilingual prompt templates from {norm}")
+                    return templates
+                except Exception as e:
+                    logger.warning(f"Failed loading prompt templates from {norm}: {e}")
+        logger.warning("No prompt_templates.json found; fallback to defaults.")
+        return {}
+
+    def _map_target_lang(self, target_lang: str) -> str:
+        if not target_lang:
+            return "English"
+        clean = target_lang.lower().split("_")[0]
+        if clean in LANGUAGE_MAPPING:
+            return LANGUAGE_MAPPING[clean]
+        for k in self.prompt_templates.keys():
+            if k.lower().startswith(clean):
+                return k
+        return target_lang.capitalize()
+
+    def get_language_template(self, target_lang: str) -> dict:
+        readable = self._map_target_lang(target_lang)
+        if readable in self.prompt_templates:
+            return self.prompt_templates[readable]
+        return self.prompt_templates.get("English", {
+            "system_rules": (
+                "You are a strict, ultra-low-latency real-time translator.\n\n"
+                "RULE: Translate the text seamlessly. Do not summarize or act like a chatbot. Output only the translated text.\n\n"
+                "JSON SCHEMA:\n{\"translated_text\": \"...\", \"requires_retranslation\": false, \"detected_action_item\": null}"
+            ),
+            "meeting_context_label": "Meeting Context:\n{meeting_context}",
+            "sliding_window_label": "Recent Live Transcript:\n{sliding_window}",
+            "user_instruction": "{context_str}Translate the above text seamlessly into English and extract the result into JSON format.\n\nTarget: \"{text}\""
+        })
+
+    def get_aligned_system_prompt(self, target_lang: str) -> str:
+        tmpl = self.get_language_template(target_lang)
+        system_rules = tmpl.get("system_rules", "")
+        if self._tokenizer:
+            try:
+                tokens = self._tokenizer.encode(system_rules, add_special_tokens=False)
+                remainder = len(tokens) % 16
+                if remainder != 0:
+                    pad_tokens = 16 - remainder
+                    system_rules += " " * pad_tokens
+            except Exception:
+                pass
+        else:
+            remainder = len(system_rules) % 16
+            if remainder != 0:
+                system_rules += " " * (16 - remainder)
+        return f"<|im_start|>system\n{system_rules}<|im_end|>\n"
+
+    def format_translation_prompt(
+        self,
+        text: str,
+        source_lang: str,
+        target_lang: str,
+        sliding_window: str = "",
+        meeting_context: str = "",
+    ) -> str:
+        system_block = self.get_aligned_system_prompt(target_lang)
+        tmpl = self.get_language_template(target_lang)
+
+        context_blocks = []
+        if meeting_context.strip():
+            ctx_lbl = tmpl.get("meeting_context_label", "Meeting Context:\n{meeting_context}")
+            context_blocks.append(ctx_lbl.replace("{meeting_context}", meeting_context.strip()))
+        if sliding_window.strip():
+            sw_lbl = tmpl.get("sliding_window_label", "Recent Live Transcript:\n{sliding_window}")
+            context_blocks.append(sw_lbl.replace("{sliding_window}", sliding_window.strip()))
+
+        context_str = "\n\n".join(context_blocks) + "\n\n" if context_blocks else ""
+        raw_instruction = tmpl.get(
+            "user_instruction",
+            "{context_str}Translate the above text seamlessly and extract the result into JSON format.\n\nTarget: \"{text}\""
+        )
+        user_content = raw_instruction.replace("{context_str}", context_str).replace("{text}", text.strip())
+
+        return f"{system_block}<|im_start|>user\n{user_content}<|im_end|>\n<|im_start|>assistant\n"
+
+    def parse_llm_output(self, raw_output: str, fallback_text: str = "") -> Tuple[str, Optional[str]]:
+        if not raw_output:
+            return fallback_text, None
+
+        # 1. Try finding JSON block
+        json_match = re.search(r'\{[^{}]*"translated_text"[^{}]*\}', raw_output, re.DOTALL)
+        if json_match:
+            try:
+                data = json.loads(json_match.group(0))
+                trans = data.get("translated_text", "").strip()
+                action = data.get("detected_action_item")
+                if trans:
+                    return trans, action
+            except Exception:
+                pass
+
+        # 2. Raw text fallback
+        clean = raw_output.strip().strip('"\'`')
+        clean = re.sub(r'^(?:Speaker\s+[A-Z0-9_]+|\[S_[A-Z0-9_]+\]|\w+)\s*:\s*', '', clean, flags=re.IGNORECASE).strip()
+        clean = re.sub(r'<\|im_end\|>.*', '', clean, flags=re.DOTALL).strip()
+        clean = clean.split('\n')[0].strip()
+        return (clean if clean else fallback_text), None
 
     async def load(self) -> None:
         if self.is_loaded:

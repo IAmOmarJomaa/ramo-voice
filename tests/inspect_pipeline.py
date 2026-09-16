@@ -19,6 +19,11 @@ from typing import Dict, Any, List, Optional
 import soundfile as sf
 import websockets
 
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 
 def get_default_url() -> str:
     """Read ws_url from ~/.hermes/config.yaml or fall back to default."""
@@ -150,52 +155,66 @@ async def run_benchmark(
                     msg = await ws.recv()
                     if isinstance(msg, bytes):
                         continue
-                    event = json.loads(msg)
-                    while isinstance(event, str):
-                        event = json.loads(event)
+                    try:
+                        event = json.loads(msg)
+                        while isinstance(event, str):
+                            event = json.loads(event)
+                    except Exception:
+                        continue
+
+                    if not isinstance(event, dict):
+                        continue
+
                     etype = event.get("type", "")
                     ts_now = time.strftime("%H:%M:%S")
 
-                    if etype == "transcript":
-                        speaker = event.get("speaker", "Unknown")
-                        detected_speakers.add(speaker)
-                        text = event.get("text", "")
-                        words = len(event.get("words", []))
-                        emotion = event.get("emotion", "NEUTRAL")
-                        is_final = event.get("is_final", False)
-                        received_transcripts.append((speaker, text, is_final))
-                        
-                        flag = "\u2705 FINAL" if is_final else "\u23f3 PROV"
-                        print(f"[{ts_now}] 👂 [STT {flag}] [{speaker}] '{text}' (Words: {words} | Emotion: {emotion})", flush=True)
+                    try:
+                        if etype == "transcript":
+                            speaker = event.get("speaker", "Unknown")
+                            detected_speakers.add(speaker)
+                            text = event.get("text", "")
+                            words = len(event.get("words", []))
+                            emotion = event.get("emotion", "NEUTRAL")
+                            is_final = event.get("is_final", False)
+                            received_transcripts.append((speaker, text, is_final))
+                            
+                            flag = "✅ FINAL" if is_final else "⏳ PROV"
+                            print(f"[{ts_now}] 👂 [STT {flag}] [{speaker}] '{text}' (Words: {words} | Emotion: {emotion})", flush=True)
 
-                    elif etype == "translation_result":
-                        speaker = event.get("speaker", "Unknown")
-                        text = event.get("text", "")
-                        lang = event.get("language", target_lang)
-                        print(f"[{ts_now}] 🌐 [TRANSLATION -> {lang}] [{speaker}]: '{text}'", flush=True)
+                        elif etype == "translation_result":
+                            speaker = event.get("speaker", "Unknown")
+                            text = event.get("text", "")
+                            lang = event.get("language", target_lang)
+                            print(f"[{ts_now}] 🌐 [TRANSLATION -> {lang}] [{speaker}]: '{text}'", flush=True)
 
-                    elif etype == "action_item":
-                        action_text = event.get("action", {}).get("text") or event.get("source_text", "")
-                        print(f"[{ts_now}] 📋 [ACTION ITEM DETECTED]: '{action_text}'", flush=True)
+                        elif etype == "action_item":
+                            action_val = event.get("action")
+                            if isinstance(action_val, dict):
+                                action_text = action_val.get("text", "")
+                            else:
+                                action_text = str(action_val or event.get("source_text", "") or event.get("text", ""))
+                            print(f"[{ts_now}] 📋 [ACTION ITEM DETECTED]: '{action_text}'", flush=True)
 
-                    elif etype == "tts_audio":
-                        raw_b64 = event.get("data", "")
-                        pcm_bytes = base64.b64decode(raw_b64)
-                        tts_audio_chunks.append(pcm_bytes)
-                        sr_tts = event.get("sample_rate", 24000)
-                        print(f"[{ts_now}] 🎙️ [TTS AUDIO CHUNK] Received {len(pcm_bytes)} bytes PCM ({sr_tts}Hz)", flush=True)
+                        elif etype == "tts_audio":
+                            raw_b64 = event.get("data", "")
+                            pcm_bytes = base64.b64decode(raw_b64)
+                            tts_audio_chunks.append(pcm_bytes)
+                            sr_tts = event.get("sample_rate", 24000)
+                            print(f"[{ts_now}] 🎙️ [TTS AUDIO CHUNK] Received {len(pcm_bytes)} bytes PCM ({sr_tts}Hz)", flush=True)
 
-                    elif etype == "tts_end":
-                        chunk_id = event.get("chunk_id", "")
-                        print(f"[{ts_now}] 🏁 [TTS COMPLETE] Chunk {chunk_id} synthesized successfully.", flush=True)
+                        elif etype == "tts_end":
+                            chunk_id = event.get("chunk_id", "")
+                            print(f"[{ts_now}] 🏁 [TTS COMPLETE] Chunk {chunk_id} synthesized successfully.", flush=True)
 
-                    elif etype == "speaker_detected":
-                        speaker = event.get("speaker_id", "")
-                        detected_speakers.add(speaker)
-                        print(f"[{ts_now}] 👥 [SPEAKER IDENTIFIED]: {speaker}", flush=True)
+                        elif etype == "speaker_detected":
+                            speaker = event.get("speaker_id", "")
+                            detected_speakers.add(speaker)
+                            print(f"[{ts_now}] 👥 [SPEAKER IDENTIFIED]: {speaker}", flush=True)
 
-                    elif etype == "interrupt":
-                        print(f"[{ts_now}] ⚡ [BARGE-IN / INTERRUPT DETECTED]", flush=True)
+                        elif etype == "interrupt":
+                            print(f"[{ts_now}] ⚡ [BARGE-IN / INTERRUPT DETECTED]", flush=True)
+                    except Exception as inner_e:
+                        print(f"[{ts_now}] ⚠️ [EVENT PARSE WARNING]: {inner_e} on message {event}", flush=True)
 
             except websockets.exceptions.ConnectionClosed:
                 pass
