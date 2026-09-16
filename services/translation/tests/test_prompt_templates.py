@@ -13,7 +13,8 @@ def test_prompt_template_french_loaded():
 def test_apc_system_prompt_padding():
     engine = LocalLLMEngine()
     system_prompt = engine.get_aligned_system_prompt("fr")
-    assert "Vous êtes un traducteur en temps réel" in system_prompt
+    assert "strict, ultra-low-latency real-time speech translator" in system_prompt
+    assert "French" in system_prompt
     assert system_prompt.startswith("<|im_start|>system\n")
     assert system_prompt.endswith("<|im_end|>\n")
 
@@ -28,9 +29,8 @@ def test_format_translation_prompt_with_sliding_window():
         meeting_context="Project sync",
     )
     assert "<|im_start|>system" in prompt
-    assert "Vous êtes un traducteur en temps réel" in prompt
-    assert "<|im_start|>user" in prompt
-    assert "Can you hear me?" in prompt
+    assert "<input_to_translate>\nCan you hear me?\n</input_to_translate>" in prompt
+    assert "<context>" in prompt
     assert "Speaker 1: Hello everyone." in prompt
     assert "<|im_start|>assistant" in prompt
 

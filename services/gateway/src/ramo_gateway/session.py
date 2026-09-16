@@ -17,7 +17,7 @@ class GatewaySession:
     def __init__(self, session_id: str):
         self.session_id = session_id
         self.target_language = "fr"
-        self.auto_tts = True
+        self.auto_tts = False
         self.source = "mic"
         self.context_summary = ""
         self.studio_id = "default_studio"
@@ -27,6 +27,8 @@ class GatewaySession:
         self._last_known_speaker = "Unknown"
         self.last_ping = time.time()
         self._recent_tts: Dict[str, float] = {}
+        self.dialogue_history: list = []
+        self.action_items: list = []
         self._lock = threading.Lock()
 
     def ping(self) -> None:

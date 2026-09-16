@@ -59,7 +59,7 @@ def run_http_probe(url: str):
 
         req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
         try:
-            with urllib.request.urlopen(req, timeout=15) as resp:
+            with urllib.request.urlopen(req, timeout=60) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
                 print(f"*] Input [{spk}]: \"{text}\"")
                 print(f"  \u2705 Translated : \"{data.get('translated_text')}\"")

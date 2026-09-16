@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from .router import TranslationRouter
 from .action_detector import detect_action_item
+from .intelligence import MeetingIntelligenceSynthesizer
 from ramo_common.logging import setup_service_logging, tail_service_log
 
 logger = setup_service_logging("ramo_translate")
@@ -23,6 +24,7 @@ app = FastAPI(
 )
 
 router = TranslationRouter()
+intelligence_synth = MeetingIntelligenceSynthesizer()
 
 
 class TranslationRequest(BaseModel):
@@ -50,6 +52,17 @@ class ActionItemRequest(BaseModel):
 class ActionItemResponse(BaseModel):
     detected_action: Optional[str]
     speaker_id: str
+
+
+class MeetingIntelligenceRequest(BaseModel):
+    dialogue_turns: list[str] = Field(default_factory=list, description="Recent multi-turn dialogue snippets")
+
+
+class MeetingIntelligenceResponse(BaseModel):
+    action_items: list[dict] = Field(default_factory=list)
+    direct_orders: list[dict] = Field(default_factory=list)
+    verification_claims: list[str] = Field(default_factory=list)
+    key_notes: list[str] = Field(default_factory=list)
 
 
 @app.get("/health")
@@ -95,6 +108,18 @@ async def extract_action_items(req: ActionItemRequest):
     return ActionItemResponse(
         detected_action=action,
         speaker_id=req.speaker_id,
+    )
+
+
+@app.post("/v1/meeting/intelligence", response_model=MeetingIntelligenceResponse)
+async def extract_meeting_intelligence(req: MeetingIntelligenceRequest):
+    """Deep semantic extraction: action items, direct orders, claims, and notes."""
+    res = await intelligence_synth.analyze(req.dialogue_turns, router.engine)
+    return MeetingIntelligenceResponse(
+        action_items=res.get("action_items", []),
+        direct_orders=res.get("direct_orders", []),
+        verification_claims=res.get("verification_claims", []),
+        key_notes=res.get("key_notes", []),
     )
 
 

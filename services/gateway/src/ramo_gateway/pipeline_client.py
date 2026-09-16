@@ -24,6 +24,7 @@ from ramo_speaker.cluster import SpeakerClusterer
 from ramo_speaker.segmenter import AudioSegmenter
 from ramo_translate.router import TranslationRouter
 from ramo_translate.action_detector import detect_action_item
+from ramo_translate.intelligence import MeetingIntelligenceSynthesizer
 from ramo_voice.engines.supertonic_engine import SupertonicEngine
 from ramo_voice.engines.kokoro_engine import KokoroEngine
 from ramo_voice.engines.f5_engine import F5TTSEngine
@@ -52,6 +53,7 @@ class PipelineDispatcher:
 
         # 3. Translation & Meeting Intelligence
         self.translator = TranslationRouter()
+        self.intelligence_synth = MeetingIntelligenceSynthesizer()
 
         # 4. Voice Engines
         self.tts_supertonic = SupertonicEngine()
@@ -68,9 +70,8 @@ class PipelineDispatcher:
         await self.stt.load()
         await self.tts_supertonic.load()
         await self.tts_kokoro.load()
-        await self.tts_f5.load()
+        await self.translator.engine.load()
         self._initialized = True
-        logger.info("Pipeline engines initialized.")
 
     def clean_audio_pcm(self, pcm16_bytes: bytes) -> Tuple[np.ndarray, bytes]:
         """Convert PCM16 bytes to float32, apply 80Hz HPF, VAD, spectral gate, and AGC."""
@@ -79,14 +80,14 @@ class PipelineDispatcher:
         cleaned_pcm16 = (np.clip(cleaned, -1.0, 1.0) * 32767).astype(np.int16).tobytes()
         return cleaned, cleaned_pcm16
 
-    async def process_stt(self, audio_f32: np.ndarray) -> Dict[str, Any]:
-        """Run STT with word-level timestamps and emotion detection."""
+    async def process_stt(self, audio_f32: np.ndarray) -> dict:
+        """Run STT inference."""
         if not self._initialized:
             await self.initialize()
-        return await self.stt.transcribe(audio_f32, sample_rate=self.sample_rate)
+        return await self.stt.transcribe(audio_f32)
 
     def identify_speaker(self, audio_f32: np.ndarray, last_known: str = "Unknown") -> str:
-        """Extract CampPlus embedding and match/update cluster centroid."""
+        """Identify or cluster speaker embedding using CampPlus 192-dim projection."""
         if len(audio_f32) < int(0.2 * self.sample_rate):
             logger.debug(f"👥 [DIAR] Audio too short ({len(audio_f32)} samples < 0.2s) - inheriting '{last_known}'")
             return last_known if last_known != "Unknown" else "Speaker 1"
@@ -102,7 +103,7 @@ class PipelineDispatcher:
         target_lang: str,
         session_id: str = "default",
         speaker_id: str = "Speaker 1",
-    ) -> Tuple[str, bool]:
+    ) -> Tuple[str, bool, Optional[str]]:
         """Translate text with 0ms fast-bypass and 3-tier sliding context."""
         res = await self.translator.translate(
             text=text,
@@ -111,7 +112,11 @@ class PipelineDispatcher:
             session_id=session_id,
             speaker_id=speaker_id,
         )
-        return res.translated_text, res.is_bypass
+        return res.translated_text, res.is_bypass, res.detected_action
+
+    async def extract_meeting_intelligence(self, dialogue_turns: list) -> dict:
+        """Extract multi-turn meeting intelligence (actions, orders, notes)."""
+        return await self.intelligence_synth.analyze(dialogue_turns, self.translator.engine)
 
     def check_action_item(self, text: str) -> Optional[str]:
         """Classify if utterance contains commitments, schedule changes, or task delegations."""

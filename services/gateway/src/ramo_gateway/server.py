@@ -86,6 +86,15 @@ async def stream_logs(websocket: WebSocket):
 # WebSocket: Bridge-Tauri Protocol (/v1/stream & /v1/realtime)
 # -----------------------------------------------------------------------------
 
+async def _safe_send_json(ws: WebSocket, payload: dict) -> bool:
+    try:
+        await ws.send_json(payload)
+        return True
+    except Exception as e:
+        logger.debug(f"Failed to send JSON (client disconnected): {e}")
+        return False
+
+
 async def _handle_audio_cut(
     websocket: WebSocket,
     sess: GatewaySession,
@@ -109,7 +118,7 @@ async def _handle_audio_cut(
     interrupted = sm.on_speech_start()
     if interrupted:
         logger.info(f"⚡ [BARGE_IN] Speech detected during assistant turn — sending interrupt")
-        await websocket.send_json({"type": "interrupt"})
+        await _safe_send_json(websocket, {"type": "interrupt"})
 
     # 2. Speaker identification & inheritance
     last_spk = sess.get_last_known_speaker()
@@ -148,15 +157,18 @@ async def _handle_audio_cut(
         "emotion": emotion_tag,
         "event": "<|Speech|>",
     }
-    await websocket.send_json(transcript_frame)
+    await _safe_send_json(websocket, transcript_frame)
 
     if not is_final:
         return
 
+    # Record dialogue turn into session memory
+    sess.dialogue_history.append(f"{speaker_id}: {transcript_text}")
+
     # 5. Translation
     target_lang = sess.target_language
     source_lang = stt_lang
-    translated_text, _ = await dispatcher.translate_text(
+    translated_text, is_bypass, llm_action = await dispatcher.translate_text(
         text=transcript_text,
         source_lang=source_lang,
         target_lang=target_lang,
@@ -168,7 +180,8 @@ async def _handle_audio_cut(
         logger.info(
             f"🌐 [TRANS_OUT] [{source_lang} -> {target_lang}] '{transcript_text}' -> '{translated_text}'"
         )
-        await websocket.send_json(
+        await _safe_send_json(
+            websocket,
             {
                 "type": "translation_result",
                 "chunk_id": trace_id,
@@ -182,11 +195,13 @@ async def _handle_audio_cut(
             }
         )
 
-    # 6. Action items
-    action = dispatcher.check_action_item(transcript_text)
+    # 6. Action items (Prioritize LLM semantic extraction, fallback to regex only on fast-bypass)
+    action = llm_action or (dispatcher.check_action_item(transcript_text) if is_bypass else None)
     if action:
         logger.info(f"📋 [ACTION_ITEM] Detected action '{action}' in transcript '{transcript_text}'")
-        await websocket.send_json(
+        sess.action_items.append({"action": action, "speaker": speaker_id, "text": transcript_text})
+        await _safe_send_json(
+            websocket,
             {
                 "type": "action_item",
                 "action_item": action,
@@ -201,7 +216,30 @@ async def _handle_audio_cut(
             }
         )
 
-    # 7. Auto TTS Synthesis
+    # Node 2: Trigger async Meeting Intelligence Synthesizer periodically
+    if len(sess.dialogue_history) >= 2 and len(sess.dialogue_history) % 3 == 0:
+        async def _run_intelligence_bg(turns: list, ws: WebSocket, s_id: str):
+            try:
+                intel = await dispatcher.extract_meeting_intelligence(turns)
+                if any(intel.values()):
+                    logger.info(
+                        f"🧠 [MEETING_INTELLIGENCE] Extracted {len(intel.get('action_items', []))} action items, "
+                        f"{len(intel.get('direct_orders', []))} direct orders"
+                    )
+                    await _safe_send_json(
+                        ws,
+                        {
+                            "type": "meeting_intelligence",
+                            "session_id": s_id,
+                            **intel,
+                        },
+                    )
+            except Exception as ie:
+                logger.debug(f"Background intelligence task error: {ie}")
+
+        asyncio.create_task(_run_intelligence_bg(list(sess.dialogue_history[-6:]), websocket, sess.session_id))
+
+    # 7. Auto TTS Synthesis (strictly optional, defaults to False)
     if sess.auto_tts and translated_text:
         tts_pcm, tts_sr = await dispatcher.synthesize_speech(
             text=translated_text,
@@ -213,7 +251,8 @@ async def _handle_audio_cut(
             logger.info(
                 f"🔊 [TTS_OUT] Synthesized {len(tts_pcm)} bytes ({tts_dur:.2f}s) @ {tts_sr}Hz via {sess.tts_engine}"
             )
-            await websocket.send_json(
+            await _safe_send_json(
+                websocket,
                 {
                     "type": "tts_audio",
                     "chunk_id": trace_id,
@@ -222,7 +261,8 @@ async def _handle_audio_cut(
                     "sample_rate": tts_sr,
                 }
             )
-            await websocket.send_json(
+            await _safe_send_json(
+                websocket,
                 {
                     "type": "tts_end",
                     "chunk_id": trace_id,
@@ -256,6 +296,26 @@ async def websocket_stream_endpoint(websocket: WebSocket):
 
     trace_counter = 0
 
+    # Producer-Consumer queue: decouples network I/O from neural inference
+    cut_queue: asyncio.Queue = asyncio.Queue(maxsize=200)
+
+    async def cut_consumer_worker():
+        while True:
+            try:
+                item = await cut_queue.get()
+                if item is None:
+                    break
+                pcm_data, cut_is_final, c_trace_id = item
+                await _handle_audio_cut(websocket, sess, sm, pcm_data, cut_is_final, c_trace_id)
+            except asyncio.CancelledError:
+                break
+            except Exception as ce:
+                logger.error(f"Error in audio cut consumer: {ce}")
+            finally:
+                cut_queue.task_done()
+
+    consumer_task = asyncio.create_task(cut_consumer_worker())
+
     try:
         while True:
             msg = await websocket.receive()
@@ -271,15 +331,13 @@ async def websocket_stream_endpoint(websocket: WebSocket):
                 logger.debug(f"🎙️ [AUDIO_IN] Received {len(pcm_bytes)} bytes PCM audio from {sess.source}")
                 cuts = chronos.add_audio(pcm_bytes)
                 for cut in cuts:
-                    await _handle_audio_cut(websocket, sess, sm, cut.pcm_data, cut.is_final, trace_id)
+                    await cut_queue.put((cut.pcm_data, cut.is_final, trace_id))
 
                 # Check provisional tick
                 if chronos.should_trigger_provisional():
                     snapshot = chronos.get_provisional_snapshot()
                     if snapshot:
-                        asyncio.create_task(
-                            _handle_audio_cut(websocket, sess, sm, snapshot, False, trace_id + "_prov")
-                        )
+                        await cut_queue.put((snapshot, False, trace_id + "_prov"))
 
             # JSON text frame input
             elif "text" in msg and msg["text"]:
@@ -306,7 +364,7 @@ async def websocket_stream_endpoint(websocket: WebSocket):
                             pcm_bytes = base64.b64decode(b64_data)
                             cuts = chronos.add_audio(pcm_bytes)
                             for cut in cuts:
-                                await _handle_audio_cut(websocket, sess, sm, cut.pcm_data, cut.is_final, trace_id)
+                                await cut_queue.put((cut.pcm_data, cut.is_final, trace_id))
                         except Exception as e:
                             logger.error(f"Error decoding base64 audio: {e}")
 
@@ -324,7 +382,7 @@ async def websocket_stream_endpoint(websocket: WebSocket):
                 elif msg_type == "eos":
                     cut = chronos.flush()
                     if cut:
-                        await _handle_audio_cut(websocket, sess, sm, cut.pcm_data, True, trace_id + "_EOS")
+                        await cut_queue.put((cut.pcm_data, True, trace_id + "_EOS"))
 
                 elif msg_type in ("tts_request", "tts") or cmd_str in ("tts", "tts_request"):
                     text_to_speak = data.get("text", "")
@@ -339,41 +397,45 @@ async def websocket_stream_endpoint(websocket: WebSocket):
                             engine_type=sess.tts_engine,
                         )
                         if len(tts_pcm) > 0:
-                            await websocket.send_json(
+                            await _safe_send_json(
+                                websocket,
                                 {
                                     "type": "tts_audio",
                                     "chunk_id": trace_id,
                                     "speaker_id": spk_id,
                                     "data": base64.b64encode(tts_pcm).decode("ascii"),
                                     "sample_rate": tts_sr,
-                                }
+                                },
                             )
-                            await websocket.send_json(
+                            await _safe_send_json(
+                                websocket,
                                 {
                                     "type": "tts_end",
                                     "chunk_id": trace_id,
                                     "speaker_id": spk_id,
-                                }
+                                },
                             )
 
                 elif msg_type == "agent_listen" or cmd_str == "agent_listen":
                     enabled = bool(data.get("enabled", True))
                     sess.set_agent_mode(enabled)
-                    await websocket.send_json(
+                    await _safe_send_json(
+                        websocket,
                         {
                             "type": "agent_listen_ack",
                             "agent_mode": enabled,
                             "session_id": session_id,
-                        }
+                        },
                     )
 
                 elif msg_type == "silence":
                     sm.on_speech_stop()
-                    await websocket.send_json({"type": "state_change", "state": sm.state.value})
+                    await _safe_send_json(websocket, {"type": "state_change", "state": sm.state.value})
 
     except (WebSocketDisconnect, RuntimeError):
         logger.info(f"🔴 [WS Disconnected] Session {session_id} disconnected.")
     finally:
+        consumer_task.cancel()
         session_store.remove(session_id)
 
 

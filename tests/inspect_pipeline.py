@@ -83,20 +83,22 @@ async def run_benchmark(
     speed_factor: float = 1.0,
     source: str = "process",
     out_wav: str = "tests/fixtures/output_tts_benchmark.wav",
+    auto_tts: bool = False,
 ):
     print("=" * 75)
     print("🚀 ramO Audio Intelligence Pipeline Benchmark & Deep Diagnostic")
     print("=" * 75)
     print(f"📡 WebSocket Target : {ws_url}")
     print(f"🎧 Audio Fixture    : {audio_path}")
-    print(f"👥 Audio Source Mode: {source} (process = multi-speaker diarization)")
+    print(f"👥 Audio Source Mode: {source} ({'process = multi-speaker diarization' if source == 'process' else 'mic = single-speaker owner'})")
     print(f"🌐 Target Language  : {target_lang}")
     print(f"⚡ Streaming Chunk  : {chunk_ms}ms ({speed_factor}x speed)")
+    print(f"🎙️ Auto TTS Enabled : {auto_tts}")
     print("=" * 75 + "\n")
 
     # 1. Load Audio
     if not os.path.exists(audio_path):
-        print(f"[-] ERROR: Audio file not found at {audio_path}")
+        print(f"[-] ERROR: Audio fixture not found at {audio_path}")
         return
 
     audio_data, sr = sf.read(audio_path, dtype="float32")
@@ -140,12 +142,12 @@ async def run_benchmark(
             "type": "config",
             "target_language": target_lang,
             "source_language": "auto",
-            "auto_tts": True,
+            "auto_tts": auto_tts,
             "source": source,
             "context_summary": "Duke University COVID-19 and Influenza Webinar",
         }
         await ws.send(json.dumps(config_frame))
-        print(f"[*] Sent Pipeline Configuration: target_lang={target_lang}, source={source}, auto_tts=True\n")
+        print(f"[*] Sent Pipeline Configuration: target_lang={target_lang}, source={source}, auto_tts={auto_tts}\n")
 
         # Background listener task
         async def listen_events():
@@ -210,6 +212,25 @@ async def run_benchmark(
                             speaker = event.get("speaker_id", "")
                             detected_speakers.add(speaker)
                             print(f"[{ts_now}] 👥 [SPEAKER IDENTIFIED]: {speaker}", flush=True)
+
+                        elif etype == "meeting_intelligence":
+                            actions = event.get("action_items", [])
+                            orders = event.get("direct_orders", [])
+                            claims = event.get("verification_claims", [])
+                            notes = event.get("key_notes", [])
+                            print(f"[{ts_now}] 🧠 [MEETING INTELLIGENCE SYNTHESIS]:", flush=True)
+                            if actions:
+                                for a in actions:
+                                    print(f"       📌 Task: {a.get('task')} | Assignee: {a.get('assignee')} | By: {a.get('assigned_by')} | Due: {a.get('deadline')}", flush=True)
+                            if orders:
+                                for o in orders:
+                                    print(f"       ⚡ Order: {o.get('order')} -> {o.get('target')}", flush=True)
+                            if claims:
+                                for c in claims:
+                                    print(f"       🔍 Fact Check: {c}", flush=True)
+                            if notes:
+                                for n in notes:
+                                    print(f"       📝 Note: {n}", flush=True)
 
                         elif etype == "interrupt":
                             print(f"[{ts_now}] ⚡ [BARGE-IN / INTERRUPT DETECTED]", flush=True)
@@ -301,6 +322,7 @@ def main():
     parser.add_argument("--source", default="process", choices=["process", "mic"], help="Audio source (process for multi-speaker diarization, mic for single-user owner)")
     parser.add_argument("--speed", type=float, default=1.0, help="Playback speed multiplier (1.0 = real-time, 2.0 = 2x)")
     parser.add_argument("--out-wav", default="tests/fixtures/output_tts_benchmark.wav", help="Output WAV path")
+    parser.add_argument("--auto-tts", action="store_true", default=False, help="Enable auto TTS synthesis (default: False)")
     args = parser.parse_args()
 
     url = sanitize_url(args.url or get_default_url())
@@ -314,6 +336,7 @@ def main():
             speed_factor=args.speed,
             source=args.source,
             out_wav=args.out_wav,
+            auto_tts=args.auto_tts,
         )
     )
 

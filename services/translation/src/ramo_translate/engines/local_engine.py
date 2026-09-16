@@ -136,9 +136,17 @@ class LocalLLMEngine(BaseTranslationEngine):
             "user_instruction": "{context_str}Translate the above text seamlessly into English and extract the result into JSON format.\n\nTarget: \"{text}\""
         })
 
-    def get_aligned_system_prompt(self, target_lang: str) -> str:
-        tmpl = self.get_language_template(target_lang)
-        system_rules = tmpl.get("system_rules", "")
+    def get_aligned_system_prompt(self, target_lang: str = "English") -> str:
+        readable = self._map_target_lang(target_lang)
+        system_rules = (
+            "You are a strict, ultra-low-latency real-time speech translator.\n\n"
+            f"RULES:\n"
+            f"1. Translate ONLY the text enclosed within <input_to_translate> tags into {readable}.\n"
+            "2. The <context> block contains recent dialogue strictly for speaker continuity, pronouns, and topic context.\n"
+            "3. NEVER translate, summarize, or repeat anything from <context>.\n"
+            "4. Output ONLY a valid JSON object matching this schema:\n"
+            '{"translated_text": "..."}'
+        )
         if self._tokenizer:
             try:
                 tokens = self._tokenizer.encode(system_rules, add_special_tokens=False)
@@ -163,22 +171,20 @@ class LocalLLMEngine(BaseTranslationEngine):
         meeting_context: str = "",
     ) -> str:
         system_block = self.get_aligned_system_prompt(target_lang)
-        tmpl = self.get_language_template(target_lang)
 
-        context_blocks = []
+        user_blocks = []
+        context_parts = []
         if meeting_context.strip():
-            ctx_lbl = tmpl.get("meeting_context_label", "Meeting Context:\n{meeting_context}")
-            context_blocks.append(ctx_lbl.replace("{meeting_context}", meeting_context.strip()))
+            context_parts.append(f"Meeting Overview: {meeting_context.strip()}")
         if sliding_window.strip():
-            sw_lbl = tmpl.get("sliding_window_label", "Recent Live Transcript:\n{sliding_window}")
-            context_blocks.append(sw_lbl.replace("{sliding_window}", sliding_window.strip()))
+            context_parts.append(f"Recent Dialogue:\n{sliding_window.strip()}")
 
-        context_str = "\n\n".join(context_blocks) + "\n\n" if context_blocks else ""
-        raw_instruction = tmpl.get(
-            "user_instruction",
-            "{context_str}Translate the above text seamlessly and extract the result into JSON format.\n\nTarget: \"{text}\""
-        )
-        user_content = raw_instruction.replace("{context_str}", context_str).replace("{text}", text.strip())
+        if context_parts:
+            context_body = "\n\n".join(context_parts)
+            user_blocks.append(f"<context>\n{context_body}\n</context>")
+
+        user_blocks.append(f"<input_to_translate>\n{text.strip()}\n</input_to_translate>")
+        user_content = "\n\n".join(user_blocks)
 
         return f"{system_block}<|im_start|>user\n{user_content}<|im_end|>\n<|im_start|>assistant\n"
 
@@ -349,6 +355,7 @@ class LocalLLMEngine(BaseTranslationEngine):
             except Exception as e:
                 logger.error(f"Neural generation failed: {e}. Falling back to linguistic mapping.", exc_info=True)
 
+
         # 2. Comprehensive Conversational Linguistic Mapping Dictionary
         phrase_lookup: Dict[Tuple[str, str], str] = {
             # French
@@ -424,3 +431,37 @@ class LocalLLMEngine(BaseTranslationEngine):
         for word in words:
             yield word + " "
             await asyncio.sleep(0.01)
+
+    async def generate_raw(self, prompt: str, max_new_tokens: int = 256) -> str:
+        """Run raw inference with arbitrary prompt for meeting intelligence synthesis."""
+        if not self.is_loaded:
+            await self.load()
+
+        if self._model is not None and self._tokenizer is not None:
+            try:
+                def _infer():
+                    import torch
+                    inputs = self._tokenizer(prompt, return_tensors="pt")
+                    if self.device == "cuda":
+                        inputs = {k: v.to(self._model.device) for k, v in inputs.items()}
+                    eos_ids = [self._tokenizer.eos_token_id] if self._tokenizer.eos_token_id else []
+                    im_end_id = self._tokenizer.convert_tokens_to_ids("<|im_end|>")
+                    if isinstance(im_end_id, int) and im_end_id not in eos_ids:
+                        eos_ids.append(im_end_id)
+
+                    with torch.inference_mode():
+                        outputs = self._model.generate(
+                            **inputs,
+                            max_new_tokens=max_new_tokens,
+                            do_sample=False,
+                            eos_token_id=eos_ids,
+                            pad_token_id=self._tokenizer.pad_token_id or eos_ids[0],
+                        )
+                    return self._tokenizer.decode(outputs[0][inputs["input_ids"].shape[1]:], skip_special_tokens=False)
+
+                loop = asyncio.get_running_loop()
+                return await loop.run_in_executor(None, _infer)
+            except Exception as e:
+                logger.error(f"Neural raw generation failed: {e}", exc_info=True)
+
+        return ""
