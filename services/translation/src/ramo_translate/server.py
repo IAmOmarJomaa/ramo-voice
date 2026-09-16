@@ -61,8 +61,13 @@ class MeetingIntelligenceRequest(BaseModel):
 class MeetingIntelligenceResponse(BaseModel):
     action_items: list[dict] = Field(default_factory=list)
     direct_orders: list[dict] = Field(default_factory=list)
-    verification_claims: list[str] = Field(default_factory=list)
+    decisions: list[dict] = Field(default_factory=list)
+    schedule_dynamics: list[dict] = Field(default_factory=list)
+    verification_claims: list[Any] = Field(default_factory=list)
+    blockers_and_risks: list[dict] = Field(default_factory=list)
+    unanswered_questions: list[dict] = Field(default_factory=list)
     key_notes: list[str] = Field(default_factory=list)
+    events: list[dict] = Field(default_factory=list)
 
 
 @app.get("/health")
@@ -113,13 +118,33 @@ async def extract_action_items(req: ActionItemRequest):
 
 @app.post("/v1/meeting/intelligence", response_model=MeetingIntelligenceResponse)
 async def extract_meeting_intelligence(req: MeetingIntelligenceRequest):
-    """Deep semantic extraction: action items, direct orders, claims, and notes."""
+    """Deep semantic extraction: action items, decisions, schedules, claims, blockers, and events."""
     res = await intelligence_synth.analyze(req.dialogue_turns, router.engine)
+    serialized_events = []
+    for ev in res.get("events", []):
+        if hasattr(ev, "event_id"):
+            serialized_events.append({
+                "event_id": ev.event_id,
+                "event_category": ev.event_category,
+                "confidence_score": ev.confidence_score,
+                "source_speakers": ev.source_speakers,
+                "trigger_quote": ev.trigger_quote,
+                "structured_payload": ev.structured_payload,
+                "requires_commander_routing": ev.requires_commander_routing,
+            })
+        elif isinstance(ev, dict):
+            serialized_events.append(ev)
+
     return MeetingIntelligenceResponse(
         action_items=res.get("action_items", []),
         direct_orders=res.get("direct_orders", []),
+        decisions=res.get("decisions", []),
+        schedule_dynamics=res.get("schedule_dynamics", []),
         verification_claims=res.get("verification_claims", []),
+        blockers_and_risks=res.get("blockers_and_risks", []),
+        unanswered_questions=res.get("unanswered_questions", []),
         key_notes=res.get("key_notes", []),
+        events=serialized_events,
     )
 
 

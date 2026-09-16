@@ -216,18 +216,36 @@ async def run_benchmark(
                         elif etype == "meeting_intelligence":
                             actions = event.get("action_items", [])
                             orders = event.get("direct_orders", [])
+                            decisions = event.get("decisions", [])
+                            schedules = event.get("schedule_dynamics", [])
                             claims = event.get("verification_claims", [])
+                            blockers = event.get("blockers_and_risks", [])
+                            questions = event.get("unanswered_questions", [])
                             notes = event.get("key_notes", [])
                             print(f"[{ts_now}] 🧠 [MEETING INTELLIGENCE SYNTHESIS]:", flush=True)
                             if actions:
                                 for a in actions:
-                                    print(f"       📌 Task: {a.get('task')} | Assignee: {a.get('assignee')} | By: {a.get('assigned_by')} | Due: {a.get('deadline')}", flush=True)
+                                    urg = f" [Urgency: {a.get('urgency')}]" if a.get("urgency") else ""
+                                    print(f"       📌 Task: {a.get('task')} | Assignee: {a.get('assignee')} | By: {a.get('assigned_by')} | Due: {a.get('deadline')}{urg}", flush=True)
+                            if decisions:
+                                for d in decisions:
+                                    print(f"       ⚖️ Decision: {d.get('decision')} | Rationale: {d.get('rationale')}", flush=True)
+                            if schedules:
+                                for s in schedules:
+                                    print(f"       📅 Schedule: {s.get('event_type')} -> {s.get('proposed_time')}", flush=True)
+                            if blockers:
+                                for b in blockers:
+                                    print(f"       🚧 Blocker: {b.get('blocker')} [Severity: {b.get('severity')}]", flush=True)
+                            if questions:
+                                for q in questions:
+                                    print(f"       ❓ Open Question: {q.get('question')} (From: {q.get('asked_by')})", flush=True)
                             if orders:
                                 for o in orders:
                                     print(f"       ⚡ Order: {o.get('order')} -> {o.get('target')}", flush=True)
                             if claims:
                                 for c in claims:
-                                    print(f"       🔍 Fact Check: {c}", flush=True)
+                                    claim_txt = c.get("claim") if isinstance(c, dict) else str(c)
+                                    print(f"       🔍 Fact Check: {claim_txt}", flush=True)
                             if notes:
                                 for n in notes:
                                     print(f"       📝 Note: {n}", flush=True)
