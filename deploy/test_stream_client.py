@@ -41,7 +41,7 @@ except ImportError:
     sys.exit(1)
 
 
-async def run_client(url: str, wav_path: str, target_lang: str, auto_tts: bool):
+async def run_client(url: str, wav_path: str, target_lang: str, auto_tts: bool, max_seconds: float = 0.0):
     print("=" * 70)
     print("🎙️  ramO Voice Engine: Standalone Live Streaming Test Client")
     print("=" * 70)
@@ -49,6 +49,8 @@ async def run_client(url: str, wav_path: str, target_lang: str, auto_tts: bool):
     print(f"[*] Audio Fixture    : {wav_path}")
     print(f"[*] Target Language  : {target_lang}")
     print(f"[*] Auto TTS Enabled : {auto_tts}")
+    if max_seconds > 0:
+        print(f"[*] Max Stream Time  : {max_seconds:.1f}s")
     print("=" * 70 + "\n")
 
     if not os.path.exists(wav_path):
@@ -67,6 +69,8 @@ async def run_client(url: str, wav_path: str, target_lang: str, auto_tts: bool):
         audio_data = audio_data.mean(axis=-1)
 
     pcm_bytes = (np.clip(audio_data, -1.0, 1.0) * 32767).astype(np.int16).tobytes()
+    if max_seconds > 0:
+        pcm_bytes = pcm_bytes[:int(max_seconds * 32000)]
     duration_s = len(pcm_bytes) / 32000.0
     print(f"[*] Loaded {duration_s:.2f}s of 16kHz audio ({len(pcm_bytes)} bytes)\n")
 
@@ -99,6 +103,8 @@ async def run_client(url: str, wav_path: str, target_lang: str, auto_tts: bool):
                 "translations": [],
                 "tts_received": 0,
                 "tts_bytes": 0,
+                "tts_buffers": [],
+                "tts_sr": 24000,
                 "speakers": set(),
             }
 
@@ -136,6 +142,8 @@ async def run_client(url: str, wav_path: str, target_lang: str, auto_tts: bool):
                             audio_b64 = msg.get("data", "")
                             raw_audio = base64.b64decode(audio_b64)
                             stats["tts_bytes"] += len(raw_audio)
+                            stats["tts_buffers"].append(raw_audio)
+                            stats["tts_sr"] = msg.get("sample_rate", 24000)
                             dur = len(raw_audio) / (2.0 * msg.get("sample_rate", 24000))
                             print(f"🔊 [TTS AUDIO] Chunk: {dur:.2f}s ({len(raw_audio)} bytes) @ {msg.get('sample_rate')}Hz")
 
@@ -199,6 +207,15 @@ async def run_client(url: str, wav_path: str, target_lang: str, auto_tts: bool):
             for i, t in enumerate(stats['translations'], 1):
                 print(f"     {i}. \"{t}\"")
             print(f"[*] TTS Audio Chunks Received : {stats['tts_received']} ({stats['tts_bytes']} bytes)")
+            
+            if stats.get("tts_buffers"):
+                out_tts_path = "tests/output/live_received_tts.wav"
+                os.makedirs("tests/output", exist_ok=True)
+                full_raw = b"".join(stats["tts_buffers"])
+                audio_np = np.frombuffer(full_raw, dtype=np.int16).astype(np.float32) / 32768.0
+                sf.write(out_tts_path, audio_np, stats.get("tts_sr", 24000))
+                print(f"[*] Saved synthesized TTS speech : {out_tts_path}")
+
             print("=" * 70)
 
             success = stats["final_count"] > 0
@@ -218,6 +235,7 @@ def main():
     parser.add_argument("--url", default="ws://ramo-gpu:50000/v1/stream", help="WebSocket endpoint URL")
     parser.add_argument("--file", default="tests/fixtures/meeting_sample_en.wav", help="Path to 16kHz WAV audio")
     parser.add_argument("--lang", default="fr", help="Target translation language (default: fr)")
+    parser.add_argument("--max-seconds", type=float, default=0.0, help="Max duration in seconds to stream (0 = full file)")
     parser.add_argument("--no-tts", action="store_true", help="Disable automatic TTS")
 
     args = parser.parse_args()
@@ -226,6 +244,7 @@ def main():
         wav_path=args.file,
         target_lang=args.lang,
         auto_tts=not args.no_tts,
+        max_seconds=args.max_seconds,
     ))
     sys.exit(0 if success else 1)
 
