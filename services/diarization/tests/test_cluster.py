@@ -72,3 +72,45 @@ def test_cluster_crosstalk_never_mints_new_speaker():
     # Must assign to nearest known speaker without creating SPEAKER_01
     assert assigned == "SPEAKER_00"
     assert len(clusterer.get_speakers()) == 1
+
+
+def test_cluster_duration_short_interjection_inherits_previous():
+    """Moonshine standard: Utterance < 1.0s inherits previous speaker to avoid interjection fragmentation."""
+    clusterer = SpeakerClusterer(similarity_threshold=0.75)
+    v_base = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+    spk_id = clusterer.assign_or_update(v_base, duration_s=3.0)
+    assert spk_id == "SPEAKER_00"
+
+    # Short 0.5s interjection ("Yeah") with noisy/low similarity
+    v_short_noise = np.array([0.2, 0.9, 0.0, 0.0], dtype=np.float32)
+    v_short_noise /= np.linalg.norm(v_short_noise)
+
+    # With previous_speaker_id provided, must inherit without creating SPEAKER_01
+    assigned = clusterer.assign_or_update(
+        v_short_noise,
+        duration_s=0.5,
+        previous_speaker_id="SPEAKER_00"
+    )
+    assert assigned == "SPEAKER_00"
+    assert len(clusterer.get_speakers()) == 1
+
+
+def test_cluster_duration_scaled_threshold():
+    """Moonshine standard: 1.0s-3.0s utterances use scaled threshold, preventing false clusters."""
+    clusterer = SpeakerClusterer(similarity_threshold=0.80)
+    v_base = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+    clusterer.assign_or_update(v_base, duration_s=4.0)
+
+    # Embedding with sim ~ 0.65 (below 0.80 strict, but matches under scaled threshold at 1.2s)
+    # Cosine sim = dot([1, 0, 0, 0], [0.65, sqrt(1 - 0.65^2), 0, 0]) = 0.65
+    angle_vec = np.array([0.65, np.sqrt(1.0 - 0.65**2), 0.0, 0.0], dtype=np.float32)
+
+    # At duration_s=1.2s, scaled threshold allows match
+    assigned_scaled = clusterer.assign_or_update(angle_vec, duration_s=1.2)
+    assert assigned_scaled == "SPEAKER_00"
+
+    # At duration_s=4.0s with another orthogonal vector, strict threshold rejects and creates new speaker
+    v_new = np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float32)
+    assigned_strict = clusterer.assign_or_update(v_new, duration_s=4.0)
+    assert assigned_strict == "SPEAKER_01"
+

@@ -1,138 +1,180 @@
 """
 services.gateway.tests.test_chronos
 ===================================
-TDD Unit tests for ChronosBuffer:
-- 10.0s Rolling Sliding Window (WINDOW_MAX_SECS = 10, WINDOW_MAX_BYTES = 320,000)
-- 1.0s Emit Pace (EMIT_EVERY_BYTES = 32,000)
-- LocalAgreement (n=2) consensus stabilization
-- Punctuation-based buffer trimming on [.!?]
-- No premature 7.0s monologue hard cutoff
-- Flush on EOS commits tentative tokens and purges buffer
+TDD Unit tests for LiveUtterancePipeline and LocalAgreement (Moonshine + Meetily + StenoAI standard):
+- 512ms (8,192-sample) rolling look-behind buffer preserving plosive onsets
+- Silero VAD state machine with 2,000ms redemption time bridging natural pauses
+- Linear probability fading between 10.0s and 15.0s hunting for natural pause boundaries
+- Monologue soft-commit with 300ms tail context carry at 15.0s ceiling
+- Adaptive EWMA keep-pace guard adjusting partial intervals to prevent queue backlog
+- LocalAgreement-2 with word-boundary snapping longest common prefix
 """
 
 import pytest
 import numpy as np
-from ramo_gateway.chronos import ChronosBuffer, ChronosCutType, LocalAgreement
+from ramo_gateway.chronos import (
+    LiveUtterancePipeline,
+    UtteranceEvent,
+    LocalAgreement,
+    longest_common_prefix_word_boundary,
+    calculate_fade_factor,
+)
 
 
-def test_chronos_emit_pace_1s():
-    """Verify that cuts are emitted every 1.0s (32,000 bytes) of new audio."""
-    buf = ChronosBuffer(sample_rate=16000)
-    sr = 16000
+def test_local_agreement_word_boundary_snapping():
+    """Verify LCP snaps back to last whitespace when match ends mid-word."""
+    # Mid-word split: "transcript" vs "transcription" -> snaps back to "hello"
+    prefix = longest_common_prefix_word_boundary("hello transcript", "hello transcription")
+    assert prefix == "hello"
 
-    # 0.5s audio (16,000 bytes) -> Not enough to trigger 1.0s emit pace
-    pcm_500ms = np.zeros(int(0.5 * sr), dtype=np.int16).tobytes()
-    cuts = buf.add_audio(pcm_500ms)
-    assert len(cuts) == 0
+    # Full word match: "hello world foo" vs "hello world bar"
+    prefix2 = longest_common_prefix_word_boundary("hello world foo", "hello world bar")
+    assert prefix2 == "hello world"
 
-    # Additional 0.5s audio (total 32,000 bytes = 1.0s) -> Should emit sliding window cut
-    cuts2 = buf.add_audio(pcm_500ms)
-    assert len(cuts2) == 1
-    assert cuts2[0].cut_type == ChronosCutType.SLIDING_WINDOW
-    assert cuts2[0].is_final is False
-    assert len(cuts2[0].pcm_data) == 32000
-
-
-def test_chronos_sliding_window_capped_at_10s():
-    """Verify sliding window does not exceed 10.0s (320,000 bytes) even after 15s of audio."""
-    buf = ChronosBuffer(sample_rate=16000)
-    sr = 16000
-
-    # Feed 15 seconds of audio in 1-second chunks
-    one_sec_pcm = (0.2 * np.sin(2 * np.pi * 440 * np.linspace(0, 1, sr, dtype=np.float32)) * 32767).astype(np.int16).tobytes()
-    last_cut = None
-    for _ in range(15):
-        cuts = buf.add_audio(one_sec_pcm)
-        if cuts:
-            last_cut = cuts[-1]
-
-    assert last_cut is not None
-    # Maximum window must be capped at 10.0s (320,000 bytes)
-    assert len(last_cut.pcm_data) == 320000
-    # Buffer contains full uncommitted history until trimmed
-    assert len(buf.audio_buffer) >= 320000
+    # Exact match
+    prefix3 = longest_common_prefix_word_boundary("meeting notes", "meeting notes")
+    assert prefix3 == "meeting notes"
 
 
 def test_local_agreement_n2_consensus():
-    """Verify words are committed only after appearing identically in 2 consecutive hypotheses."""
+    """Verify LocalAgreement commits tokens only after 2 consecutive agreements."""
     la = LocalAgreement(n_agreement=2)
 
-    # Window 1
-    res1 = la.step("so it is the sec meaning")
+    res1 = la.step("we need to review the budget")
     assert res1.committed == ""
-    assert res1.tentative == "so it is the sec meaning"
+    assert res1.tentative == "we need to review the budget"
 
-    # Window 2: Prefix "so it is the sec" matches
-    res2 = la.step("so it is the sec meaning secure and govern")
-    assert res2.committed == "so it is the sec meaning"
-    assert res2.tentative == "secure and govern"
+    res2 = la.step("we need to review the budget for next quarter")
+    assert res2.committed == "we need to review the budget"
+    assert res2.tentative == "for next quarter"
 
-    # Window 3: More words match
-    res3 = la.step("so it is the sec meaning secure and govern growth")
-    assert res3.committed == "so it is the sec meaning secure and govern"
-    assert res3.tentative == "growth"
+    res3 = la.flush()
+    assert res3.committed == "we need to review the budget for next quarter"
 
 
-def test_chronos_punctuation_trimming():
-    """Verify that when committed text ends with [.!?], Chronos trims the confirmed audio."""
-    buf = ChronosBuffer(sample_rate=16000)
+def test_monologue_probability_fading_calculation():
+    """Verify probability fade factor between 10.0s and 15.0s."""
     sr = 16000
+    # Before 10s: fade factor is 1.0 (no attenuation)
+    assert calculate_fade_factor(current_samples=int(5.0 * sr), sr=sr) == 1.0
+    assert calculate_fade_factor(current_samples=int(10.0 * sr), sr=sr) == 1.0
 
-    # Feed 5 seconds of audio
-    five_sec_pcm = np.ones(int(5.0 * sr), dtype=np.int16).tobytes()
-    buf.add_audio(five_sec_pcm)
-    initial_len = len(buf.audio_buffer)
-    assert initial_len == int(5.0 * sr * 2)
+    # At 12.5s: halfway through fade window (10s to 15s) -> 0.5
+    fade_12_5 = calculate_fade_factor(current_samples=int(12.5 * sr), sr=sr)
+    assert pytest.approx(fade_12_5, abs=1e-3) == 0.5
 
-    # Simulate STT committing a sentence ending in '.' at timestamp 3.5s
-    words = [
-        {"word": "Hello", "start": 0.5, "end": 1.0},
-        {"word": "world.", "start": 1.5, "end": 3.5},
-    ]
-    trimmed_bytes = buf.trim_on_punctuation(text="Hello world.", words=words)
-
-    assert trimmed_bytes > 0
-    assert len(buf.audio_buffer) < initial_len
-    # Audio buffer should now retain only the remaining ~1.5s (+ small safety overlap)
-    expected_remaining = int((5.0 - 3.5) * sr * 2)
-    assert abs(len(buf.audio_buffer) - expected_remaining) <= int(0.3 * sr * 2)
+    # At 15.0s: fully attenuated -> 0.0
+    fade_15 = calculate_fade_factor(current_samples=int(15.0 * sr), sr=sr)
+    assert pytest.approx(fade_15, abs=1e-3) == 0.0
 
 
-def test_monologue_no_hard_7s_cutoff():
-    """Verify unbroken monologue is NOT chopped into hard cuts at 7.0 seconds."""
-    buf = ChronosBuffer(sample_rate=16000)
+def test_pipeline_preroll_look_behind():
+    """Verify 512ms rolling look-behind buffer is prepended upon voice onset."""
     sr = 16000
+    pipeline = LiveUtterancePipeline(sample_rate=sr)
 
-    # Feed 8.5 seconds of unbroken audio
-    t = np.linspace(0, 8.5, int(8.5 * sr), dtype=np.float32)
-    speech_pcm = (0.3 * np.sin(2 * np.pi * 300 * t) * 32767).astype(np.int16).tobytes()
+    # 1. Feed 1.0s of silence (zeros) in 250ms chunks to fill look-behind ring
+    chunk_250ms = np.zeros(int(0.25 * sr), dtype=np.float32)
+    for _ in range(4):
+        events = pipeline.push_audio(chunk_250ms, is_voice=False)
+        assert len(events) == 0
 
-    # Feed in 0.5s chunks
-    chunk_size = int(0.5 * sr * 2)
-    all_cuts = []
-    for i in range(0, len(speech_pcm), chunk_size):
-        chunk = speech_pcm[i:i + chunk_size]
-        cuts = buf.add_audio(chunk)
-        all_cuts.extend(cuts)
+    assert pipeline.in_speech is False
+    assert len(pipeline.look_behind_ring) == 8192  # 512ms
 
-    # Should have emitted 8 sliding window cuts (every 1.0s)
-    # NONE of them should be a HARD_CUT or premature FINAL cut!
-    assert len(all_cuts) == 8
-    for cut in all_cuts:
-        assert cut.cut_type == ChronosCutType.SLIDING_WINDOW
-        assert cut.is_final is False
+    # 2. Voice onset: Speech starts with audio chunk
+    speech_chunk = np.ones(int(0.25 * sr), dtype=np.float32) * 0.5
+    events = pipeline.push_audio(speech_chunk, is_voice=True)
+
+    assert pipeline.in_speech is True
+    assert pipeline.current_line_id is not None
+    # current_samples must contain look_behind_ring (8192) + speech_chunk (4000)
+    assert len(pipeline.current_samples) == 8192 + len(speech_chunk)
 
 
-def test_chronos_flush_on_eos():
-    """Verify flush on EOS produces a final flush and clears buffer."""
-    buf = ChronosBuffer(sample_rate=16000)
+def test_pipeline_vad_redemption_2000ms():
+    """Verify 2,000ms redemption time bridges human intra-sentence breath pauses."""
     sr = 16000
+    pipeline = LiveUtterancePipeline(sample_rate=sr, vad_redemption_ms=2000)
 
-    pcm = np.ones(int(2.5 * sr), dtype=np.int16).tobytes()
-    buf.add_audio(pcm)
+    # 1. Voice onset: 1.0s of speech
+    chunk_500ms_voice = np.ones(int(0.5 * sr), dtype=np.float32) * 0.4
+    pipeline.push_audio(chunk_500ms_voice, is_voice=True)
+    pipeline.push_audio(chunk_500ms_voice, is_voice=True)
+    assert pipeline.in_speech is True
 
-    cut = buf.flush()
-    assert cut is not None
-    assert cut.cut_type == ChronosCutType.FORCED_FLUSH
-    assert cut.is_final is True
-    assert len(buf.audio_buffer) == 0
+    # 2. Natural breath pause: 1.5s silence (3 x 500ms chunks)
+    chunk_500ms_silence = np.zeros(int(0.5 * sr), dtype=np.float32)
+    events1 = pipeline.push_audio(chunk_500ms_silence, is_voice=False)
+    events2 = pipeline.push_audio(chunk_500ms_silence, is_voice=False)
+    events3 = pipeline.push_audio(chunk_500ms_silence, is_voice=False)
+
+    # Within 1.5s < 2.0s redemption, turn must NOT be closed!
+    assert len(events1) == 0
+    assert len(events2) == 0
+    assert len(events3) == 0
+    assert pipeline.in_speech is True
+
+    # 3. Exceed redemption: another 600ms silence (total 2.1s > 2.0s)
+    chunk_600ms_silence = np.zeros(int(0.6 * sr), dtype=np.float32)
+    final_events = pipeline.push_audio(chunk_600ms_silence, is_voice=False)
+
+    assert len(final_events) == 1
+    assert final_events[0].event_type == "final"
+    assert final_events[0].is_final is True
+    assert pipeline.in_speech is False
+
+
+def test_pipeline_monologue_soft_commit_ceiling_15s():
+    """Verify monologue reaching 15.0s ceiling triggers soft commit with 300ms tail context carry."""
+    sr = 16000
+    pipeline = LiveUtterancePipeline(sample_rate=sr, max_utterance_s=15.0, soft_commit_tail_s=0.3)
+
+    initial_line_id = None
+    all_final_events = []
+
+    # Feed 16 seconds of continuous voice in 0.5s chunks
+    chunk_voice = np.ones(int(0.5 * sr), dtype=np.float32) * 0.3
+    for _ in range(32):
+        events = pipeline.push_audio(chunk_voice, is_voice=True)
+        if initial_line_id is None and pipeline.current_line_id is not None:
+            initial_line_id = pipeline.current_line_id
+
+        for ev in events:
+            if ev.is_final:
+                all_final_events.append(ev)
+
+    # Must have triggered exactly 1 soft-commit final at the 15.0s mark
+    assert len(all_final_events) >= 1
+    first_final = all_final_events[0]
+    assert first_final.line_id == initial_line_id
+    assert first_final.is_final is True
+    # Audio duration committed must be >= 15.0s
+    assert len(first_final.audio) >= int(15.0 * sr)
+
+    # After soft-commit:
+    # 1. Pipeline must still be in speech
+    assert pipeline.in_speech is True
+    # 2. Line ID must have advanced
+    assert pipeline.current_line_id != initial_line_id
+    # 3. New segment must retain exactly 300ms tail context (4,800 samples)
+    # plus any chunks processed afterwards
+    assert len(pipeline.current_samples) >= int(0.3 * sr)
+
+
+def test_pipeline_adaptive_ewma_keep_pace():
+    """Verify EWMA decode wall-time dynamically stretches partial preview interval."""
+    sr = 16000
+    pipeline = LiveUtterancePipeline(sample_rate=sr)
+
+    base_samples = pipeline.effective_partial_interval_samples()
+    # Base interval is 0.5s = 8000 samples
+    assert base_samples == int(0.5 * sr)
+
+    # Simulate heavy GPU decode wall-time: 1.0s inference
+    pipeline.record_decode_wall_time(1.0)
+
+    expanded_samples = pipeline.effective_partial_interval_samples()
+    # Paced at EWMA * 1.2 safety factor
+    assert expanded_samples > base_samples
+    assert expanded_samples >= int(0.8 * sr)

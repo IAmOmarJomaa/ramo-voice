@@ -29,11 +29,21 @@ class SpeakerClusterer:
         norm = float(np.linalg.norm(v)) + 1e-9
         return (v / norm).astype(np.float32)
 
-    def assign_or_update(self, embedding: np.ndarray, is_overlap: bool = False, freeze_centroid: bool = False) -> str:
+    def assign_or_update(
+        self,
+        embedding: np.ndarray,
+        is_overlap: bool = False,
+        freeze_centroid: bool = False,
+        duration_s: float = 3.0,
+        previous_speaker_id: Optional[str] = None,
+    ) -> str:
         """
         Assign an embedding to an existing speaker or initialize a new speaker.
-        If is_overlap or freeze_centroid is True, assigns to closest speaker but skips centroid updating.
-        Emits transparent diagnostic logs detailing each centroid comparison.
+        Incorporates Moonshine standard duration-scaled online leader clustering:
+        - Utterance < 1.0s inherits previous speaker to eliminate interjection fragmentation.
+        - 1.0s to 3.0s utterances apply a linearly scaled distance/similarity threshold.
+        - >= 3.0s monologues enforce the strict similarity threshold.
+        - Overlapping speech and frozen intervals never update speaker centroids.
         """
         vec = self._normalize(embedding)
 
@@ -45,6 +55,24 @@ class SpeakerClusterer:
             )
             return spk_id
 
+        # 1. Moonshine Standard: Utterance < 1.0s inherits previous speaker if available
+        if duration_s < 1.0 and previous_speaker_id is not None and previous_speaker_id in self._centroids:
+            logger.info(
+                f"[DIAR_CLUSTER] ⏩ Short interjection ({duration_s:.2f}s < 1.0s) -> Inherited previous speaker "
+                f"'{previous_speaker_id}' without centroid update."
+            )
+            return previous_speaker_id
+
+        # 2. Calculate dynamic duration-scaled similarity threshold (Moonshine standard)
+        loose_threshold = max(0.40, self.similarity_threshold - 0.20)
+        if duration_s >= 3.0:
+            effective_threshold = self.similarity_threshold
+        elif duration_s >= 1.0:
+            scale = (duration_s - 1.0) / 2.0
+            effective_threshold = self.similarity_threshold * scale + loose_threshold * (1.0 - scale)
+        else:
+            effective_threshold = loose_threshold
+
         # Compute cosine similarity with all known speaker centroids
         best_spk: Optional[str] = None
         best_sim = -1.0
@@ -52,22 +80,24 @@ class SpeakerClusterer:
 
         for spk_id, centroid in self._centroids.items():
             sim = float(np.dot(centroid, vec))
-            match_str = "MATCH!" if sim >= self.similarity_threshold else "NO MATCH"
+            match_str = "MATCH!" if sim >= effective_threshold else "NO MATCH"
             comparisons.append(f"'{spk_id}': cos_sim={sim:.4f} [{match_str}]")
             if sim > best_sim:
                 best_sim = sim
                 best_spk = spk_id
 
         logger.info(
-            f"[DIAR_CLUSTER] 👥 Evaluating turn vector against {len(self._centroids)} centroid(s) (Threshold: {self.similarity_threshold:.2f}):\n"
+            f"[DIAR_CLUSTER] 👥 Evaluating turn vector ({duration_s:.2f}s) against {len(self._centroids)} "
+            f"centroid(s) (Effective Threshold: {effective_threshold:.2f}, Base: {self.similarity_threshold:.2f}):\n"
             + "\n".join(f"  -> Centroid {c}" for c in comparisons)
         )
 
-        if best_sim >= self.similarity_threshold and best_spk is not None:
+        if best_sim >= effective_threshold and best_spk is not None:
             # Match existing speaker
-            if is_overlap or freeze_centroid:
+            if is_overlap or freeze_centroid or duration_s < 1.0:
                 logger.info(
-                    f"[DIAR_CLUSTER] ⚠️ Sub-threshold/crosstalk turn assigned to '{best_spk}' (sim={best_sim:.4f}), centroid preserved without update."
+                    f"[DIAR_CLUSTER] ⚠️ Sub-threshold/crosstalk/short turn assigned to '{best_spk}' "
+                    f"(sim={best_sim:.4f} >= {effective_threshold:.2f}), centroid preserved without update."
                 )
             else:
                 old_c = self._centroids[best_spk].copy()
@@ -76,7 +106,7 @@ class SpeakerClusterer:
                 drift = float(np.linalg.norm(new_c - old_c))
                 self._centroids[best_spk] = new_c
                 logger.info(
-                    f"[DIAR_CLUSTER] ✅ MATCH -> Assigned to '{best_spk}' (sim={best_sim:.4f} >= {self.similarity_threshold:.2f}) | "
+                    f"[DIAR_CLUSTER] ✅ MATCH -> Assigned to '{best_spk}' (sim={best_sim:.4f} >= {effective_threshold:.2f}) | "
                     f"EMA centroid updated (momentum={self.momentum:.2f}, drift={drift:.4f})"
                 )
             return best_spk
@@ -93,7 +123,7 @@ class SpeakerClusterer:
             self._centroids[new_id] = vec
             active_list = list(self._centroids.keys())
             logger.info(
-                f"[DIAR_CLUSTER] 🌟 Max similarity {best_sim:.4f} < {self.similarity_threshold:.2f} -> INITIALIZING NEW SPEAKER: '{new_id}' | "
+                f"[DIAR_CLUSTER] 🌟 Max similarity {best_sim:.4f} < {effective_threshold:.2f} -> INITIALIZING NEW SPEAKER: '{new_id}' | "
                 f"Active centroids ({len(active_list)}): {active_list}"
             )
             return new_id

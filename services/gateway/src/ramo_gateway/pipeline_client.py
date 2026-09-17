@@ -149,8 +149,11 @@ class PipelineDispatcher:
         last_known: str = "Unknown",
         is_overlap: bool = False,
         is_final: bool = True,
+        duration_s: Optional[float] = None,
     ) -> str:
         """Identify or cluster speaker embedding using CampPlus 192-dim projection."""
+        dur = duration_s if duration_s is not None else (len(audio_f32) / self.sample_rate)
+
         # 1. Provisional ticks MUST NEVER mutate speaker centroids or mint phantom speakers
         if not is_final:
             return last_known if last_known != "Unknown" else "SPEAKER_00"
@@ -158,14 +161,19 @@ class PipelineDispatcher:
         # 2. Reliable CampPlus embedding extraction requires sufficient audio (>= 0.8s)
         if len(audio_f32) < int(0.8 * self.sample_rate):
             logger.debug(
-                f"👥 [DIAR] Audio too short ({len(audio_f32)/self.sample_rate:.2f}s < 0.8s) - Bayesian continuity: inheriting '{last_known}'"
+                f"👥 [DIAR] Audio too short ({dur:.2f}s < 0.8s) - Bayesian continuity: inheriting '{last_known}'"
             )
             return last_known if last_known != "Unknown" else "SPEAKER_00"
 
         emb = self.segmenter.extract_embedding(audio_f32)
-        spk_id = self.clusterer.assign_or_update(emb, is_overlap=is_overlap)
+        spk_id = self.clusterer.assign_or_update(
+            emb,
+            is_overlap=is_overlap,
+            duration_s=dur,
+            previous_speaker_id=last_known if last_known != "Unknown" else None,
+        )
         logger.info(
-            f"👥 [DIAR_IDENTIFY] Audio chunk ({len(audio_f32)/self.sample_rate:.2f}s) -> Assigned '{spk_id}' "
+            f"👥 [DIAR_IDENTIFY] Audio chunk ({dur:.2f}s) -> Assigned '{spk_id}' "
             f"(overlap: {is_overlap}, prev: '{last_known}')"
         )
         return spk_id

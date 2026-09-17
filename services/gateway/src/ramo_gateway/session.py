@@ -8,11 +8,6 @@ import time
 import threading
 from typing import Dict, Optional, Tuple, List, Any
 
-try:
-    from ramo_listen.hypothesis_buffer import HypothesisDeduplicator
-except ImportError:
-    HypothesisDeduplicator = None
-
 
 class GatewaySession:
     """
@@ -64,17 +59,6 @@ class GatewaySession:
     def advance_chunk_seq(self) -> str:
         """Alias for advance_utterance for backward compatibility."""
         return self.advance_utterance()
-
-    def deduplicate_transcript(self, raw_text: str, words: list) -> Tuple[str, list]:
-        """Zero acoustic overlap eliminates boundary repetition at source."""
-        return raw_text, words
-
-    def get_stt_prompt(self) -> str:
-        """Static domain glossary only. Dynamic transcript feedback is strictly purged."""
-        return ""
-
-    def reset_deduplicator(self) -> None:
-        pass
 
     def ping(self) -> None:
         self.last_ping = time.time()
