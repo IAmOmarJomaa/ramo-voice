@@ -127,8 +127,9 @@ async def _handle_audio_cut(
 
     # 3. Speaker identification & inheritance
     last_spk = sess.get_last_known_speaker()
-    speaker_id = dispatcher.identify_speaker(audio_f32, last_known=last_spk, is_overlap=is_overlap)
-    sess.set_last_known_speaker(speaker_id)
+    speaker_id = dispatcher.identify_speaker(audio_f32, last_known=last_spk, is_overlap=is_overlap, is_final=is_final)
+    if is_final:
+        sess.set_last_known_speaker(speaker_id)
     is_owner = sess.source == "mic"
     logger.info(f"👥 [DIAR_OUT] Speaker: {speaker_id} | Owner: {is_owner} | Overlap: {is_overlap}")
 
@@ -140,15 +141,43 @@ async def _handle_audio_cut(
 
     if not raw_transcript:
         if is_final:
-            sess.advance_chunk_seq()
+            timestamp_str = time.strftime("%I:%M %p").lstrip("0")
+            await _safe_send_json(websocket, {
+                "type": "transcript",
+                "chunk_id": trace_id,
+                "text": "",
+                "speaker": speaker_id,
+                "is_owner": is_owner,
+                "is_final": True,
+                "language": sess.target_language,
+                "source": sess.source,
+                "words": [],
+                "timestamp": timestamp_str,
+                "emotion": "<|NEUTRAL|>",
+                "event": "<|Silence|>",
+            })
         return
 
     # Apply n-gram boundary deduplication on finalized chunks
     if is_final:
         transcript_text, words_list = sess.deduplicate_transcript(raw_transcript, words_list)
         if not transcript_text:
-            logger.info("✂️ [DEDUP] Entire chunk was redundant overlap tail — skipping re-emission")
-            sess.advance_chunk_seq()
+            logger.info("✂️ [DEDUP] Entire chunk was redundant overlap tail — emitting empty final to clear provisional UI state")
+            timestamp_str = time.strftime("%I:%M %p").lstrip("0")
+            await _safe_send_json(websocket, {
+                "type": "transcript",
+                "chunk_id": trace_id,
+                "text": "",
+                "speaker": speaker_id,
+                "is_owner": is_owner,
+                "is_final": True,
+                "language": stt_res.get("language", "en"),
+                "source": sess.source,
+                "words": [],
+                "timestamp": timestamp_str,
+                "emotion": "<|NEUTRAL|>",
+                "event": "<|Speech|>",
+            })
             return
     else:
         transcript_text = raw_transcript
@@ -191,8 +220,6 @@ async def _handle_audio_cut(
 
     if not is_final:
         return
-
-    sess.advance_chunk_seq()
 
     # Record dialogue turn into session memory
     sess.dialogue_history.append(f"{speaker_id}: {transcript_text}")
@@ -378,7 +405,10 @@ async def websocket_stream_endpoint(websocket: WebSocket):
                 logger.debug(f"🎙️ [AUDIO_IN] Received {len(pcm_bytes)} bytes PCM audio from {sess.source}")
                 cuts = chronos.add_audio(pcm_bytes)
                 for cut in cuts:
-                    await cut_queue.put((cut.pcm_data, cut.is_final, sess.get_current_chunk_id()))
+                    cid = sess.get_current_chunk_id()
+                    if cut.is_final:
+                        sess.advance_chunk_seq()
+                    await cut_queue.put((cut.pcm_data, cut.is_final, cid))
 
                 # Check provisional tick
                 if chronos.should_trigger_provisional():
@@ -411,7 +441,10 @@ async def websocket_stream_endpoint(websocket: WebSocket):
                             pcm_bytes = base64.b64decode(b64_data)
                             cuts = chronos.add_audio(pcm_bytes)
                             for cut in cuts:
-                                await cut_queue.put((cut.pcm_data, cut.is_final, sess.get_current_chunk_id()))
+                                cid = sess.get_current_chunk_id()
+                                if cut.is_final:
+                                    sess.advance_chunk_seq()
+                                await cut_queue.put((cut.pcm_data, cut.is_final, cid))
 
                             # Check provisional tick for live streaming grey preview
                             if chronos.should_trigger_provisional():
@@ -435,7 +468,10 @@ async def websocket_stream_endpoint(websocket: WebSocket):
                 elif msg_type == "eos":
                     cut = chronos.flush()
                     if cut:
-                        await cut_queue.put((cut.pcm_data, True, sess.get_current_chunk_id()))
+                        cid = sess.get_current_chunk_id()
+                        if cut.is_final:
+                            sess.advance_chunk_seq()
+                        await cut_queue.put((cut.pcm_data, True, cid))
 
                 elif msg_type in ("tts_request", "tts") or cmd_str in ("tts", "tts_request"):
                     text_to_speak = data.get("text", "")

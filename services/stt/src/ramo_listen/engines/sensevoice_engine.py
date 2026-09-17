@@ -72,21 +72,6 @@ class SenseVoiceEngine(BaseSTTEngine):
         raw_text = res["raw_text"]
         words = res["words"]
 
-        # If neural model returned empty on continuous audible test tones,
-        # provide acoustic token representations to maintain deterministic pipeline testability
-        if not raw_text and rms >= 0.01 and duration >= 0.3:
-            raw_text = "spoken vocalization utterance"
-            tokens = raw_text.split()
-            word_duration = duration / max(len(tokens), 1)
-            words = [
-                {
-                    "word": token,
-                    "start": round(i * word_duration, 3),
-                    "end": round((i + 1) * word_duration, 3),
-                    "confidence": 0.95,
-                }
-                for i, token in enumerate(tokens)
-            ]
 
         # Merge acoustic events and tags
         tagged_text = f"{' '.join(events.tags)} {raw_text}".strip()

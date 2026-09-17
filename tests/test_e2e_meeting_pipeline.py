@@ -9,9 +9,11 @@ End-to-End simulation of the sovereign 4-stage ramO Meeting Translation Pipeline
 5. Voice Cloning & Synthesis: F5-TTS Flow-Matching synthesis with pre-transcribed text or Supertonic fallback (ramo_voice)
 """
 
+import os
 import asyncio
 import pytest
 import numpy as np
+import soundfile as sf
 
 from ramo_clean.pipeline import AudioPreconditioner
 from ramo_listen.engines.whisper_engine import WhisperSTTEngine
@@ -41,14 +43,21 @@ async def test_end_to_end_meeting_translation_flow():
     await fallback_tts.load()
     await cloning_tts.load()
 
-    # 2. Simulate Speaker Alice speaking for 5.0 seconds with background AC noise
-    t_alice = np.linspace(0, 5.0, int(5.0 * sr), endpoint=False, dtype=np.float32)
-    # 40Hz HVAC rumble + 400Hz Alice vocal tone + white noise
-    raw_alice_audio = (
-        0.3 * np.sin(2 * np.pi * 40 * t_alice)
-        + 0.4 * np.sin(2 * np.pi * 400 * t_alice)
-        + np.random.randn(len(t_alice)) * 0.02
-    ).astype(np.float32)
+    # 2. Use ground truth meeting speech fixture for Alice
+    wav_path = "tests/fixtures/meeting_sample_en.wav"
+    if os.path.exists(wav_path):
+        real_audio, _ = sf.read(wav_path, dtype="float32")
+        if len(real_audio) < int(5.0 * sr):
+            tile_count = int(np.ceil((5.0 * sr) / len(real_audio)))
+            real_audio = np.tile(real_audio, tile_count)
+        raw_alice_audio = real_audio[: int(5.0 * sr)]
+    else:
+        t_alice = np.linspace(0, 5.0, int(5.0 * sr), endpoint=False, dtype=np.float32)
+        raw_alice_audio = (
+            0.3 * np.sin(2 * np.pi * 40 * t_alice)
+            + 0.4 * np.sin(2 * np.pi * 400 * t_alice)
+            + np.random.randn(len(t_alice)) * 0.02
+        ).astype(np.float32)
 
     # Step 1: Precondition Audio (Clean rumble, normalize, gate)
     clean_alice = cleaner.process_chunk(raw_alice_audio).audio

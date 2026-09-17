@@ -148,11 +148,20 @@ class PipelineDispatcher:
         audio_f32: np.ndarray,
         last_known: str = "Unknown",
         is_overlap: bool = False,
+        is_final: bool = True,
     ) -> str:
         """Identify or cluster speaker embedding using CampPlus 192-dim projection."""
-        if len(audio_f32) < int(0.2 * self.sample_rate):
-            logger.debug(f"👥 [DIAR] Audio too short ({len(audio_f32)} samples < 0.2s) - inheriting '{last_known}'")
-            return last_known if last_known != "Unknown" else "Speaker 1"
+        # 1. Provisional ticks MUST NEVER mutate speaker centroids or mint phantom speakers
+        if not is_final:
+            return last_known if last_known != "Unknown" else "SPEAKER_00"
+
+        # 2. Reliable CampPlus embedding extraction requires sufficient audio (>= 1.2s)
+        if len(audio_f32) < int(1.2 * self.sample_rate):
+            logger.debug(
+                f"👥 [DIAR] Audio too short ({len(audio_f32)/self.sample_rate:.2f}s < 1.2s) - inheriting '{last_known}'"
+            )
+            return last_known if last_known != "Unknown" else "SPEAKER_00"
+
         emb = self.segmenter.extract_embedding(audio_f32)
         spk_id = self.clusterer.assign_or_update(emb, is_overlap=is_overlap)
         logger.info(

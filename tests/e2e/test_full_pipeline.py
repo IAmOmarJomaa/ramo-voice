@@ -86,10 +86,10 @@ def test_full_pipeline_ground_truth_audio(client):
             received_types.append(m_type)
 
             if m_type == "transcript":
-                transcript_text = msg.get("text", "")
                 assert "words" in msg
-                assert msg["is_final"] is True
                 assert "speaker" in msg
+                if msg.get("is_final"):
+                    transcript_text = msg.get("text", "")
 
             elif m_type == "translation_result":
                 translated_text = msg.get("text", "")

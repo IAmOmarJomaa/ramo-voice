@@ -20,7 +20,7 @@ class SpeakerClusterer:
     to update the rolling speaker centroid.
     """
 
-    def __init__(self, similarity_threshold: float = 0.62, momentum: float = 0.70):
+    def __init__(self, similarity_threshold: float = 0.58, momentum: float = 0.70):
         self.similarity_threshold = similarity_threshold
         self.momentum = momentum
         self._centroids: Dict[str, np.ndarray] = {}
@@ -81,10 +81,16 @@ class SpeakerClusterer:
                 )
             return best_spk
         else:
+            # Overlap/crosstalk intervals should NEVER mint a new speaker centroid
+            if is_overlap and best_spk is not None:
+                logger.info(
+                    f"[DIAR_CLUSTER] ⚠️ Overlapping crosstalk turn assigned to nearest speaker '{best_spk}' (sim={best_sim:.4f}), centroid preserved."
+                )
+                return best_spk
+
             # Initialize new speaker
             new_id = f"SPEAKER_{len(self._centroids):02d}"
-            if not is_overlap:
-                self._centroids[new_id] = vec
+            self._centroids[new_id] = vec
             active_list = list(self._centroids.keys())
             logger.info(
                 f"[DIAR_CLUSTER] 🌟 Max similarity {best_sim:.4f} < {self.similarity_threshold:.2f} -> INITIALIZING NEW SPEAKER: '{new_id}' | "

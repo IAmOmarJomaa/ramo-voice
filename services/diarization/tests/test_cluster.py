@@ -58,3 +58,17 @@ def test_cluster_crosstalk_rejection():
 
     centroid_after = clusterer.get_centroid(spk_id)
     np.testing.assert_allclose(centroid_before, centroid_after)
+
+
+def test_cluster_crosstalk_never_mints_new_speaker():
+    clusterer = SpeakerClusterer(similarity_threshold=0.75)
+    v_base = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+    spk_id = clusterer.assign_or_update(v_base)
+    assert spk_id == "SPEAKER_00"
+
+    # Overlapping audio with low similarity (< 0.75)
+    v_crosstalk_low_sim = np.array([0.1, 0.9, 0.0, 0.0], dtype=np.float32)
+    assigned = clusterer.assign_or_update(v_crosstalk_low_sim, is_overlap=True)
+    # Must assign to nearest known speaker without creating SPEAKER_01
+    assert assigned == "SPEAKER_00"
+    assert len(clusterer.get_speakers()) == 1
