@@ -327,8 +327,14 @@ async def websocket_stream_endpoint(websocket: WebSocket):
         while True:
             try:
                 item = await cut_queue.get()
-                if item is None:
-                    break
+            except asyncio.CancelledError:
+                break
+
+            if item is None:
+                cut_queue.task_done()
+                break
+
+            try:
                 pcm_data, cut_is_final, c_trace_id = item
                 await _handle_audio_cut(websocket, sess, sm, pcm_data, cut_is_final, c_trace_id)
             except asyncio.CancelledError:
