@@ -69,3 +69,24 @@ def test_chronos_tail_discard_guard():
     # Tail discard guard should discard lingering tail rather than emitting a cut
     assert len(cuts) == 0
     assert len(buf.audio_buffer) == 0
+
+
+def test_chronos_cuts_at_acoustic_dip():
+    buf = ChronosBuffer(sample_rate=16000)
+    sr = 16000
+
+    # 3.2s speech + 0.1s pause (dip) + 0.9s speech = 4.2s total (> 4.0s MAX_CONTINUOUS_BYTES)
+    t1 = np.linspace(0, 3.2, int(3.2 * sr), dtype=np.float32)
+    s1 = (0.3 * np.sin(2 * np.pi * 300 * t1) * 32767).astype(np.int16)
+    dip = np.zeros(int(0.1 * sr), dtype=np.int16)
+    t2 = np.linspace(0, 0.9, int(0.9 * sr), dtype=np.float32)
+    s2 = (0.3 * np.sin(2 * np.pi * 300 * t2) * 32767).astype(np.int16)
+
+    full_audio = np.concatenate([s1, dip, s2]).tobytes()
+    cuts = buf.add_audio(full_audio)
+
+    # Should cut at the acoustic dip rather than cutting mid-syllable at 4.0s
+    assert len(cuts) >= 1
+    cut = cuts[0]
+    assert cut.cut_type == ChronosCutType.SOFT_CUT
+    assert 96000 <= len(cut.pcm_data) <= 112000

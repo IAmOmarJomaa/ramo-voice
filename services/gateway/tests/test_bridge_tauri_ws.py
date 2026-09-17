@@ -83,11 +83,15 @@ def test_bridge_tauri_audio_streaming_flow(client):
         # Flush via eos
         ws.send_text(json.dumps({"type": "eos"}))
 
-        # We should receive transcript
+        # We may receive provisional transcript first, then final transcript
         transcript_msg = ws.receive_json()
         assert transcript_msg["type"] == "transcript"
         assert "text" in transcript_msg
-        assert transcript_msg["is_final"] is True
+        if not transcript_msg["is_final"]:
+            # Provisional preview confirmed! Now receive final transcript from EOS
+            transcript_msg = ws.receive_json()
+            assert transcript_msg["type"] == "transcript"
+            assert transcript_msg["is_final"] is True
         assert "speaker" in transcript_msg
         assert "words" in transcript_msg
 

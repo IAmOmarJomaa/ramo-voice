@@ -22,6 +22,11 @@ class BaseSTTEngine(ABC):
         pass
 
     @abstractmethod
-    async def transcribe(self, audio: np.ndarray, sample_rate: int = 16000) -> Dict[str, Any]:
+    async def transcribe(
+        self,
+        audio: np.ndarray,
+        sample_rate: int = 16000,
+        initial_prompt: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """Transcribe an audio buffer, returning text, emotion, and confidence."""
         pass

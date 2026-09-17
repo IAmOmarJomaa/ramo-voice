@@ -101,6 +101,18 @@ class PipelineDispatcher:
         await self.translator.engine.load()
         self._initialized = True
 
+    def reset_speaker_session(self) -> None:
+        """Reset speaker clustering centroids and harvester state for a fresh session."""
+        self.clusterer.reset()
+        self.harvester = VoiceprintHarvester(
+            tier1_threshold_sec=self.config.harvesting.tier1_threshold_sec,
+            tier2_threshold_sec=self.config.harvesting.tier2_threshold_sec,
+            max_buffer_sec=self.config.harvesting.max_buffer_sec,
+            min_snr_db=self.config.harvesting.min_snr_db,
+            target_sr=self.sample_rate,
+        )
+        logger.info("👥 [PIPELINE] Speaker clusterer and voiceprint harvester reset for new session.")
+
     def clean_audio_pcm(self, pcm16_bytes: bytes) -> Tuple[np.ndarray, bytes]:
         """Convert PCM16 bytes to float32, apply 80Hz HPF, VAD, spectral gate, and AGC."""
         arr = np.frombuffer(pcm16_bytes, dtype=np.int16).astype(np.float32) / 32768.0
@@ -108,11 +120,11 @@ class PipelineDispatcher:
         cleaned_pcm16 = (np.clip(cleaned, -1.0, 1.0) * 32767).astype(np.int16).tobytes()
         return cleaned, cleaned_pcm16
 
-    async def process_stt(self, audio_f32: np.ndarray) -> dict:
-        """Run STT inference."""
+    async def process_stt(self, audio_f32: np.ndarray, initial_prompt: Optional[str] = None) -> dict:
+        """Run STT inference with optional acoustic context prompt."""
         if not self._initialized:
             await self.initialize()
-        return await self.stt.transcribe(audio_f32)
+        return await self.stt.transcribe(audio_f32, initial_prompt=initial_prompt)
 
     def get_prosody_buffer(self, session_id: str = "default") -> ProsodicClauseBuffer:
         """Retrieve or initialize session prosodic clause buffer."""

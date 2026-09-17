@@ -56,6 +56,13 @@ async def get_logs(tail: int = 100):
     return {"service": "ramo_speaker", "lines": tail_service_log("ramo_speaker", n=tail)}
 
 
+@app.post("/v1/speakers/reset")
+async def reset_speakers():
+    """Reset all speaker centroids and harvested profiles for a new session."""
+    clusterer.reset()
+    return {"status": "success", "message": "Speaker centroids reset successfully."}
+
+
 @app.post("/v1/diarize")
 async def diarize_audio(file: UploadFile = File(...)):
     """

@@ -74,7 +74,12 @@ class WhisperSTTEngine(BaseSTTEngine):
         self.is_loaded = True
         logger.info("Faster-Whisper neural model loaded successfully.")
 
-    async def transcribe(self, audio: np.ndarray, sample_rate: int = 16000) -> Dict[str, Any]:
+    async def transcribe(
+        self,
+        audio: np.ndarray,
+        sample_rate: int = 16000,
+        initial_prompt: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """Transcribe speech audio with word-level timestamps and acoustic emotion detection."""
         if not self.is_loaded:
             await self.load()
@@ -110,6 +115,7 @@ class WhisperSTTEngine(BaseSTTEngine):
                 beam_size=5,
                 word_timestamps=True,
                 vad_filter=False,
+                initial_prompt=initial_prompt,
             )
             seg_list = list(segments)
             return seg_list, info

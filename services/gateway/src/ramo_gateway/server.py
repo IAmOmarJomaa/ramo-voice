@@ -132,12 +132,23 @@ async def _handle_audio_cut(
     is_owner = sess.source == "mic"
     logger.info(f"👥 [DIAR_OUT] Speaker: {speaker_id} | Owner: {is_owner} | Overlap: {is_overlap}")
 
-    # 4. Speech-to-text (Faster-Whisper)
-    stt_res = await dispatcher.process_stt(audio_f32)
-    transcript_text = stt_res.get("raw_text", "").strip()
+    # 4. Speech-to-text (Faster-Whisper) with acoustic prompt continuation
+    prompt = sess.get_stt_prompt() if is_final else ""
+    stt_res = await dispatcher.process_stt(audio_f32, initial_prompt=prompt if prompt else None)
+    raw_transcript = stt_res.get("raw_text", "").strip()
+    words_list = stt_res.get("words", [])
 
-    if not transcript_text:
+    if not raw_transcript:
         return
+
+    # Apply n-gram boundary deduplication on finalized chunks
+    if is_final:
+        transcript_text, words_list = sess.deduplicate_transcript(raw_transcript, words_list)
+        if not transcript_text:
+            logger.info("✂️ [DEDUP] Entire chunk was redundant overlap tail — skipping re-emission")
+            return
+    else:
+        transcript_text = raw_transcript
 
     # 5. Voice Harvesting (Strict Single-Speaker Monologue Rule)
     if is_final and not is_overlap:
@@ -152,7 +163,7 @@ async def _handle_audio_cut(
 
     emotion_tag = stt_res.get("emotion", "<|NEUTRAL|>")
     stt_lang = stt_res.get("language", "en")
-    word_count = len(stt_res.get("words", []))
+    word_count = len(words_list)
     logger.info(
         f"👂 [STT_OUT] '{transcript_text}' | Lang: {stt_lang} | Words: {word_count} | Emotion: {emotion_tag}"
     )
@@ -168,7 +179,7 @@ async def _handle_audio_cut(
         "is_final": is_final,
         "language": stt_lang,
         "source": sess.source,
-        "words": stt_res.get("words", []),
+        "words": words_list,
         "timestamp": timestamp_str,
         "emotion": emotion_tag,
         "event": "<|Speech|>",
@@ -306,6 +317,7 @@ async def websocket_stream_endpoint(websocket: WebSocket):
     sess = session_store.create(session_id)
     sm = ConversationStateMachine(silence_timeout_sec=0.3)
     chronos = ChronosBuffer(sample_rate=16000)
+    dispatcher.reset_speaker_session()
 
     # 1. Send immediate connected handshake confirmation
     await websocket.send_json(
@@ -395,6 +407,12 @@ async def websocket_stream_endpoint(websocket: WebSocket):
                             cuts = chronos.add_audio(pcm_bytes)
                             for cut in cuts:
                                 await cut_queue.put((cut.pcm_data, cut.is_final, trace_id))
+
+                            # Check provisional tick for live streaming grey preview
+                            if chronos.should_trigger_provisional():
+                                snapshot = chronos.get_provisional_snapshot()
+                                if snapshot:
+                                    await cut_queue.put((snapshot, False, trace_id + "_prov"))
                         except Exception as e:
                             logger.error(f"Error decoding base64 audio: {e}")
 

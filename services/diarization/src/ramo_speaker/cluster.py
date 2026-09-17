@@ -98,3 +98,8 @@ class SpeakerClusterer:
 
     def get_speakers(self) -> Dict[str, np.ndarray]:
         return dict(self._centroids)
+
+    def reset(self) -> None:
+        """Clear all registered speaker centroids for a fresh session."""
+        self._centroids.clear()
+        logger.info("[DIAR_CLUSTER] All speaker centroids have been reset.")

@@ -6,7 +6,12 @@ Session state tracking and duplicate TTS trigger suppression for Bridge-Tauri co
 
 import time
 import threading
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, List, Any
+
+try:
+    from ramo_listen.hypothesis_buffer import HypothesisDeduplicator
+except ImportError:
+    HypothesisDeduplicator = None
 
 
 class GatewaySession:
@@ -29,7 +34,25 @@ class GatewaySession:
         self._recent_tts: Dict[str, float] = {}
         self.dialogue_history: list = []
         self.action_items: list = []
+        self.deduplicator = HypothesisDeduplicator(max_ngram=5) if HypothesisDeduplicator else None
         self._lock = threading.Lock()
+
+    def deduplicate_transcript(self, raw_text: str, words: list) -> Tuple[str, list]:
+        if not self.deduplicator:
+            return raw_text, words
+        with self._lock:
+            return self.deduplicator.deduplicate(raw_text, words=words)
+
+    def get_stt_prompt(self) -> str:
+        if not self.deduplicator:
+            return ""
+        with self._lock:
+            return self.deduplicator.get_initial_prompt(max_chars=200)
+
+    def reset_deduplicator(self) -> None:
+        if self.deduplicator:
+            with self._lock:
+                self.deduplicator.reset()
 
     def ping(self) -> None:
         self.last_ping = time.time()

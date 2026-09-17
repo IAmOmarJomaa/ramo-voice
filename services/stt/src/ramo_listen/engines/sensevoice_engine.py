@@ -36,7 +36,12 @@ class SenseVoiceEngine(BaseSTTEngine):
         self.is_loaded = True
         logger.info("SenseVoiceEngine loaded successfully.")
 
-    async def transcribe(self, audio: np.ndarray, sample_rate: int = 16000) -> Dict[str, Any]:
+    async def transcribe(
+        self,
+        audio: np.ndarray,
+        sample_rate: int = 16000,
+        initial_prompt: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """Transcribe speech audio with emotion, acoustic tag detection, and word timestamps."""
         if not self.is_loaded:
             await self.load()

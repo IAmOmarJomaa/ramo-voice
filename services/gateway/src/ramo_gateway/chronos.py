@@ -57,6 +57,35 @@ class ChronosBuffer:
         self.silence_duration_bytes = 0
         self.bytes_since_provisional = 0
 
+    def _find_best_acoustic_dip(
+        self, search_start_bytes: int, search_end_bytes: int, frame_size: int = 1600
+    ) -> Optional[int]:
+        """
+        Scans frames of size `frame_size` (50ms @ 16kHz 16-bit mono) within [search_start_bytes, search_end_bytes].
+        Returns the byte offset of the lowest RMS energy dip if below threshold.
+        """
+        if search_end_bytes <= search_start_bytes or search_end_bytes > len(self.audio_buffer):
+            return None
+
+        best_offset = None
+        min_rms = float("inf")
+
+        step_size = max(2, frame_size // 2)
+        step_size = step_size - (step_size % 2)
+
+        for offset in range(search_start_bytes, search_end_bytes - frame_size + 1, step_size):
+            frame = bytes(self.audio_buffer[offset : offset + frame_size])
+            rms = calculate_rms(frame)
+            if rms < min_rms:
+                min_rms = rms
+                best_offset = offset + (frame_size // 2)
+                best_offset = best_offset - (best_offset % 2)
+
+        if best_offset is not None and min_rms <= 0.025:
+            return best_offset
+
+        return None
+
     def add_audio(self, chunk: bytes) -> List[ChronosCut]:
         """
         Ingest audio bytes and return any cuts triggered (hard cut or soft cut).
@@ -75,8 +104,24 @@ class ChronosBuffer:
         else:
             self.silence_duration_bytes = 0
 
-        # 1. Hard Cut (Exceeded max continuous length: 4.0s)
+        # 1. Continuous Speech Segmentation (Between 3.0s and 4.0s)
         if len(self.audio_buffer) >= self.MAX_CONTINUOUS_BYTES:
+            # First, check if there is an acoustic energy dip (micro-pause between words) in the last 1.0s
+            search_start = max(0, self.MAX_CONTINUOUS_BYTES - 32000)
+            dip_offset = self._find_best_acoustic_dip(
+                search_start_bytes=search_start,
+                search_end_bytes=len(self.audio_buffer),
+            )
+
+            if dip_offset and dip_offset > self.MIN_PROCESS_BYTES:
+                pcm_to_process = bytes(self.audio_buffer[:dip_offset])
+                cuts.append(ChronosCut(cut_type=ChronosCutType.SOFT_CUT, pcm_data=pcm_to_process, is_final=True))
+                self.audio_buffer = bytearray(self.audio_buffer[dip_offset:])
+                self.silence_duration_bytes = 0
+                self.bytes_since_provisional = len(self.audio_buffer)
+                return cuts
+
+            # Fallback Hard Cut (No acoustic dip found)
             pcm_to_process = bytes(self.audio_buffer)
             cuts.append(ChronosCut(cut_type=ChronosCutType.HARD_CUT, pcm_data=pcm_to_process, is_final=True))
 
