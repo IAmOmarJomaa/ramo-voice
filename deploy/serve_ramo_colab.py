@@ -124,13 +124,22 @@ def main():
     
     # Pre-pinning and installing core packages in parallel
     run_cmd(
-        'uv pip install --system "fastapi>=0.115.0" "uvicorn[standard]>=0.30.0" "websockets>=12.0" "soundfile>=0.12.1" "scipy>=1.13.0" "numpy>=1.26.0,<2.0.0" "pydantic>=2.8.0" "httpx>=0.27.0" "python-multipart>=0.0.9" "faster-whisper>=1.0.0" "onnxruntime>=1.17.0" "huggingface_hub[cli,hf_transfer]" hf_transfer transformers accelerate'
+        'uv pip install --system "fastapi>=0.115.0" "uvicorn[standard]>=0.30.0" "websockets>=12.0" "soundfile>=0.12.1" "scipy>=1.13.0" "numpy>=1.26.0,<2.0.0" "pydantic>=2.8.0" "httpx>=0.27.0" "python-multipart>=0.0.9" "faster-whisper>=1.0.0" "onnxruntime>=1.17.0" "kokoro-onnx>=0.3.0" "huggingface_hub[cli,hf_transfer]" hf_transfer transformers accelerate'
     )
 
     # Provision CampPlus Diarization Model
     print("  🧠 Provisioning 3D-CAM++ (CampPlus) Diarization ONNX weights...", flush=True)
     run_cmd(
         "mkdir -p models && (test -f models/campplus.onnx || wget -q -c -O models/campplus.onnx https://huggingface.co/Luigi/campplus-zh-en-onnx/resolve/main/campplus_zh_en_fp32.onnx)",
+        check=False
+    )
+
+    # Provision Kokoro-82M ONNX Speech Model
+    print("  🧠 Provisioning Kokoro-82M ONNX weights and voice vectors...", flush=True)
+    run_cmd(
+        "mkdir -p models && "
+        "(test -f models/kokoro-v0_19.onnx || wget -q -c -O models/kokoro-v0_19.onnx https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files/kokoro-v0_19.onnx) && "
+        "(test -f models/voices.bin || wget -q -c -O models/voices.bin https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files/voices.bin)",
         check=False
     )
 
@@ -151,6 +160,8 @@ def main():
     worker_env["MALLOC_MMAP_THRESHOLD_"] = "65536"
     worker_env["RAMO_LOAD_NEURAL_LLM"] = "1"
     worker_env["RAMO_LLM_MODEL"] = os.getenv("RAMO_LLM_MODEL", "Qwen/Qwen2.5-1.5B-Instruct")
+    worker_env["RAMO_KOKORO_MODEL"] = "models/kokoro-v0_19.onnx"
+    worker_env["RAMO_KOKORO_VOICES"] = "models/voices.bin"
 
     # Make log directory
     os.makedirs("logs", exist_ok=True)

@@ -6,7 +6,7 @@ Runs standalone on Port 50053.
 """
 
 import logging
-from typing import Optional
+from typing import Any, Optional
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 

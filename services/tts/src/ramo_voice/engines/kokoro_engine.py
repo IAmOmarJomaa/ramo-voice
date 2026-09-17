@@ -36,8 +36,9 @@ class KokoroEngine(BaseTTSEngine):
     ):
         super().__init__(engine_id="kokoro-82m", sample_rate=sample_rate, device=device)
         self.model_path = model_path or os.getenv("RAMO_KOKORO_MODEL", "models/kokoro-v0_19.onnx")
-        self.voices_dir = voices_dir or os.getenv("RAMO_KOKORO_VOICES", "models/voices")
+        self.voices_path = voices_dir or os.getenv("RAMO_KOKORO_VOICES", "models/voices.bin")
         self._session = None
+        self._kokoro = None
 
     async def load(self) -> None:
         if self.is_loaded:
@@ -46,15 +47,22 @@ class KokoroEngine(BaseTTSEngine):
         logger.info(f"Checking Kokoro-82M neural assets at: {self.model_path}")
         if os.path.exists(self.model_path):
             try:
-                import onnxruntime as ort
-                opts = ort.SessionOptions()
-                opts.intra_op_num_threads = 2
-                self._session = ort.InferenceSession(self.model_path, sess_options=opts)
-                self.is_loaded = True
-                logger.info("✅ Kokoro-82M ONNX neural engine loaded successfully.")
-                return
+                from kokoro_onnx import Kokoro
+                voices_file = self.voices_path
+                if not os.path.exists(voices_file):
+                    for alt in ["models/voices.bin", "models/voices.json", "voices.bin", "models/voices"]:
+                        if os.path.exists(alt):
+                            voices_file = alt
+                            break
+                if os.path.exists(voices_file):
+                    self._kokoro = Kokoro(self.model_path, voices_file)
+                    self.is_loaded = True
+                    logger.info("✅ Kokoro-82M ONNX neural speech engine loaded successfully.")
+                    return
+                else:
+                    logger.warning(f"Kokoro model found but voices file missing at {voices_file}")
             except Exception as e:
-                logger.warning(f"Failed to load Kokoro ONNX model: {e}")
+                logger.warning(f"Failed to load Kokoro ONNX model via kokoro_onnx: {e}")
 
         logger.info("Kokoro-82M ONNX model not present locally; operating in acoustic neural fallback mode.")
         self.is_loaded = True
@@ -73,6 +81,40 @@ class KokoroEngine(BaseTTSEngine):
         clean_text = text.strip()
         if not clean_text:
             return np.array([], dtype=np.float32), self.sample_rate
+
+        # 1. Real Neural Kokoro ONNX Inference
+        if self._kokoro is not None:
+            try:
+                lang_code = "en-us"
+                p_name = profile.name.lower()
+                v_id = profile.voice_id.lower()
+                if "fr" in v_id or "french" in p_name:
+                    lang_code = "fr-fr"
+                elif "es" in v_id or "spanish" in p_name:
+                    lang_code = "es"
+                elif "de" in v_id or "german" in p_name:
+                    lang_code = "de"
+                elif "zh" in v_id or "chinese" in p_name:
+                    lang_code = "zh"
+                elif "ja" in v_id or "japanese" in p_name:
+                    lang_code = "ja"
+
+                voice_name = profile.voice_id
+                if not voice_name or voice_name in ("default", "system"):
+                    voice_name = "af_heart" if ("female" in p_name or "heart" in v_id) else "am_adam"
+
+                samples, sr = await asyncio.to_thread(
+                    self._kokoro.create,
+                    clean_text,
+                    voice=voice_name,
+                    speed=speed,
+                    lang=lang_code,
+                )
+                if len(samples) > 0:
+                    samples = normalize_audio(samples.astype(np.float32))
+                    return samples, sr
+            except Exception as e:
+                logger.warning(f"Kokoro-ONNX neural inference error: {e}. Falling back to formant oscillator.")
 
         # Natural speech duration estimation (~15 characters per second)
         duration = max(0.35, len(clean_text) / 15.0 / max(0.2, speed))
