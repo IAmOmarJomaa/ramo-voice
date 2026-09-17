@@ -155,10 +155,10 @@ class PipelineDispatcher:
         if not is_final:
             return last_known if last_known != "Unknown" else "SPEAKER_00"
 
-        # 2. Reliable CampPlus embedding extraction requires sufficient audio (>= 1.2s)
-        if len(audio_f32) < int(1.2 * self.sample_rate):
+        # 2. Reliable CampPlus embedding extraction requires sufficient audio (>= 0.8s)
+        if len(audio_f32) < int(0.8 * self.sample_rate):
             logger.debug(
-                f"👥 [DIAR] Audio too short ({len(audio_f32)/self.sample_rate:.2f}s < 1.2s) - inheriting '{last_known}'"
+                f"👥 [DIAR] Audio too short ({len(audio_f32)/self.sample_rate:.2f}s < 0.8s) - Bayesian continuity: inheriting '{last_known}'"
             )
             return last_known if last_known != "Unknown" else "SPEAKER_00"
 

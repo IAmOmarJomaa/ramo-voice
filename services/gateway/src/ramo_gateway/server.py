@@ -133,17 +133,21 @@ async def _handle_audio_cut(
     is_owner = sess.source == "mic"
     logger.info(f"👥 [DIAR_OUT] Speaker: {speaker_id} | Owner: {is_owner} | Overlap: {is_overlap}")
 
-    # 4. Speech-to-text (Faster-Whisper) with acoustic prompt continuation
-    prompt = sess.get_stt_prompt() if is_final else ""
-    stt_res = await dispatcher.process_stt(audio_f32, initial_prompt=prompt if prompt else None)
+    # 4. Speech-to-text (Faster-Whisper) with isolated context (Zero Dynamic Prompt Feedback)
+    stt_res = await dispatcher.process_stt(audio_f32, initial_prompt=None)
     raw_transcript = stt_res.get("raw_text", "").strip()
     words_list = stt_res.get("words", [])
 
+    revision = sess.next_revision()
+    timestamp_str = time.strftime("%I:%M %p").lstrip("0")
+
     if not raw_transcript:
         if is_final:
-            timestamp_str = time.strftime("%I:%M %p").lstrip("0")
             await _safe_send_json(websocket, {
                 "type": "transcript",
+                "event": "transcript_final",
+                "utterance_id": trace_id,
+                "revision": revision,
                 "chunk_id": trace_id,
                 "text": "",
                 "speaker": speaker_id,
@@ -154,33 +158,10 @@ async def _handle_audio_cut(
                 "words": [],
                 "timestamp": timestamp_str,
                 "emotion": "<|NEUTRAL|>",
-                "event": "<|Silence|>",
             })
         return
 
-    # Apply n-gram boundary deduplication on finalized chunks
-    if is_final:
-        transcript_text, words_list = sess.deduplicate_transcript(raw_transcript, words_list)
-        if not transcript_text:
-            logger.info("✂️ [DEDUP] Entire chunk was redundant overlap tail — emitting empty final to clear provisional UI state")
-            timestamp_str = time.strftime("%I:%M %p").lstrip("0")
-            await _safe_send_json(websocket, {
-                "type": "transcript",
-                "chunk_id": trace_id,
-                "text": "",
-                "speaker": speaker_id,
-                "is_owner": is_owner,
-                "is_final": True,
-                "language": stt_res.get("language", "en"),
-                "source": sess.source,
-                "words": [],
-                "timestamp": timestamp_str,
-                "emotion": "<|NEUTRAL|>",
-                "event": "<|Speech|>",
-            })
-            return
-    else:
-        transcript_text = raw_transcript
+    transcript_text = raw_transcript
 
     # 5. Voice Harvesting (Strict Single-Speaker Monologue Rule)
     if is_final and not is_overlap:
@@ -200,10 +181,12 @@ async def _handle_audio_cut(
         f"👂 [STT_OUT] '{transcript_text}' | Lang: {stt_lang} | Words: {word_count} | Emotion: {emotion_tag}"
     )
 
-    # 4. Emit transcript frame (matching Bridge-Tauri)
-    timestamp_str = time.strftime("%I:%M %p").lstrip("0")
+    # 4. Emit transcript frame with canonical utterance_id and monotonic revision
     transcript_frame = {
         "type": "transcript",
+        "event": "transcript_final" if is_final else "transcript_provisional",
+        "utterance_id": trace_id,
+        "revision": revision,
         "chunk_id": trace_id,
         "text": transcript_text,
         "speaker": speaker_id,
@@ -214,7 +197,6 @@ async def _handle_audio_cut(
         "words": words_list,
         "timestamp": timestamp_str,
         "emotion": emotion_tag,
-        "event": "<|Speech|>",
     }
     await _safe_send_json(websocket, transcript_frame)
 

@@ -1,17 +1,18 @@
 """
 ramo_gateway.chronos
 ====================
-Chronos Dynamic Auto-Cut Buffer (PFE Section 3.5.3).
+Chronos Dynamic Auto-Cut Buffer (SOTA Dual-Path VAD & Zero-Overlap Architecture).
 Handles:
-- 4.0s hard cut (128,000 bytes at 16kHz mono)
-- 0.5s overlap tail retention across hard cuts
-- 500ms conversational silence detection (RMS < 0.015) soft cut
-- Soft-cut overlap tail discard guard
-- 500ms provisional tick for live streaming STT preview
+- Dual-Path VAD:
+    * Normal conversational pause: 300ms silence (<4.0s accumulated audio)
+    * Relaxed breath pause: 120ms silence (4.0s - 7.0s accumulated audio)
+- 7.0s Monologue Hard Ceiling for Align-then-Commit (ATC)
+- Acoustic dip boundary detection (50ms micro-pause)
+- Zero overlap tail retention (OVERLAP_TAIL_BYTES = 0)
+- 600ms provisional tick for live streaming STT preview
 """
 
 import enum
-import math
 from dataclasses import dataclass
 from typing import List, Optional
 import numpy as np
@@ -42,14 +43,22 @@ def calculate_rms(pcm_bytes: bytes) -> float:
 class ChronosBuffer:
     """
     Stateful audio accumulation buffer with intelligent dynamic segmentation.
+    Enforces SOTA Dual-Path VAD, Zero Acoustic Overlap, and Monologue Ceiling.
     """
 
-    MAX_CONTINUOUS_BYTES: int = 128000     # 4.0 seconds (64,000 samples @ 16kHz mono)
-    OVERLAP_TAIL_BYTES: int = 16000        # 0.5 seconds (8,000 samples)
-    PROVISIONAL_TICK_BYTES: int = 16000    # 0.5 seconds interval
-    SILENCE_THRESHOLD_BYTES: int = 16000   # 500ms silence duration threshold
+    # Audio format: 16kHz, 16-bit Mono = 32,000 bytes/second
+    SAMPLE_RATE: int = 16000
+    BYTES_PER_SEC: int = 32000
+
+    # Operational thresholds
+    SOFT_CEILING_BYTES: int = 128000       # 4.0 seconds
+    HARD_CEILING_BYTES: int = 224000       # 7.0 seconds (Monologue Hard Ceiling)
+    NORMAL_PAUSE_BYTES: int = 9600         # 300ms normal conversational pause
+    RELAXED_PAUSE_BYTES: int = 3840        # 120ms relaxed breath pause
+    PROVISIONAL_TICK_BYTES: int = 19200    # 600ms provisional preview interval
     SILENCE_RMS_CEILING: float = 0.015     # RMS below this is considered conversational pause
     MIN_PROCESS_BYTES: int = 3200          # 100ms minimum audio before processing
+    OVERLAP_TAIL_BYTES: int = 0            # SOTA Zero Overlap invariant (NO repeated audio)
 
     def __init__(self, sample_rate: int = 16000):
         self.sample_rate = sample_rate
@@ -88,7 +97,8 @@ class ChronosBuffer:
 
     def add_audio(self, chunk: bytes) -> List[ChronosCut]:
         """
-        Ingest audio bytes and return any cuts triggered (hard cut or soft cut).
+        Ingest audio bytes and return any cuts triggered (soft cut, dip cut, or hard cut).
+        Enforces Dual-Path VAD and ZERO acoustic overlap.
         """
         cuts: List[ChronosCut] = []
         if not chunk:
@@ -97,20 +107,53 @@ class ChronosBuffer:
         self.audio_buffer.extend(chunk)
         self.bytes_since_provisional += len(chunk)
 
-        # Check silence
+        # Check silence envelope
         rms = calculate_rms(chunk)
         if rms < self.SILENCE_RMS_CEILING:
             self.silence_duration_bytes += len(chunk)
         else:
             self.silence_duration_bytes = 0
 
-        # 1. Continuous Speech Segmentation (Between 3.0s and 4.0s)
-        if len(self.audio_buffer) >= self.MAX_CONTINUOUS_BYTES:
-            # First, check if there is an acoustic energy dip (micro-pause between words) in the last 1.0s
-            search_start = max(0, self.MAX_CONTINUOUS_BYTES - 32000)
+        buffer_len = len(self.audio_buffer)
+
+        # Determine active silence threshold via Dual-Path VAD
+        active_silence_threshold = (
+            self.NORMAL_PAUSE_BYTES
+            if buffer_len < self.SOFT_CEILING_BYTES
+            else self.RELAXED_PAUSE_BYTES
+        )
+
+        # Path 1: Conversational / Breath Pause Detected (Soft Cut)
+        if self.silence_duration_bytes >= active_silence_threshold and buffer_len >= self.MIN_PROCESS_BYTES:
+            speech_bytes = buffer_len - self.silence_duration_bytes
+            if speech_bytes < self.MIN_PROCESS_BYTES:
+                # Buffer is essentially pure silence; purge cleanly
+                self.audio_buffer = bytearray()
+                self.silence_duration_bytes = 0
+                self.bytes_since_provisional = 0
+                return cuts
+
+            pcm_to_process = bytes(self.audio_buffer[:speech_bytes])
+            cuts.append(ChronosCut(cut_type=ChronosCutType.SOFT_CUT, pcm_data=pcm_to_process, is_final=True))
+
+            # Zero overlap tail: truncate audio buffer cleanly without retaining previous speech!
+            remaining = bytes(self.audio_buffer[speech_bytes:])
+            if calculate_rms(remaining) < self.SILENCE_RMS_CEILING:
+                self.audio_buffer = bytearray()
+                self.silence_duration_bytes = 0
+            else:
+                self.audio_buffer = bytearray(remaining)
+
+            self.bytes_since_provisional = len(self.audio_buffer)
+            return cuts
+
+        # Path 2: Monologue Hard Ceiling (7.0s) reached without pause
+        if buffer_len >= self.HARD_CEILING_BYTES:
+            # First, search for an acoustic energy dip (micro-pause between words) in the last 2.0s
+            search_start = max(0, self.HARD_CEILING_BYTES - 64000)
             dip_offset = self._find_best_acoustic_dip(
                 search_start_bytes=search_start,
-                search_end_bytes=len(self.audio_buffer),
+                search_end_bytes=buffer_len,
             )
 
             if dip_offset and dip_offset > self.MIN_PROCESS_BYTES:
@@ -121,33 +164,9 @@ class ChronosBuffer:
                 self.bytes_since_provisional = len(self.audio_buffer)
                 return cuts
 
-            # Fallback Hard Cut (No acoustic dip found)
+            # Fallback Hard Cut: Clean truncation with ZERO overlap tail
             pcm_to_process = bytes(self.audio_buffer)
             cuts.append(ChronosCut(cut_type=ChronosCutType.HARD_CUT, pcm_data=pcm_to_process, is_final=True))
-
-            # Retain overlap tail so boundaries between words are not severed
-            tail = bytes(self.audio_buffer[-self.OVERLAP_TAIL_BYTES:])
-            if calculate_rms(tail) > self.SILENCE_RMS_CEILING:
-                self.audio_buffer = bytearray(tail)
-            else:
-                self.audio_buffer = bytearray()
-
-            self.silence_duration_bytes = 0
-            self.bytes_since_provisional = len(self.audio_buffer)
-            return cuts
-
-        # 2. Soft Cut (Conversational pause >= 500ms)
-        if self.silence_duration_bytes >= self.SILENCE_THRESHOLD_BYTES and len(self.audio_buffer) > self.MIN_PROCESS_BYTES:
-            speech_bytes = len(self.audio_buffer) - self.silence_duration_bytes
-            # Guard: If buffer only contains lingering overlap tail, discard rather than re-transcribing
-            if speech_bytes <= self.OVERLAP_TAIL_BYTES:
-                self.audio_buffer = bytearray()
-                self.silence_duration_bytes = 0
-                self.bytes_since_provisional = 0
-                return cuts
-
-            pcm_to_process = bytes(self.audio_buffer[:speech_bytes])
-            cuts.append(ChronosCut(cut_type=ChronosCutType.SOFT_CUT, pcm_data=pcm_to_process, is_final=True))
             self.audio_buffer = bytearray()
             self.silence_duration_bytes = 0
             self.bytes_since_provisional = 0
@@ -156,8 +175,11 @@ class ChronosBuffer:
         return cuts
 
     def should_trigger_provisional(self) -> bool:
-        """Returns True if provisional tick interval reached."""
-        if self.bytes_since_provisional >= self.PROVISIONAL_TICK_BYTES and len(self.audio_buffer) >= self.MIN_PROCESS_BYTES:
+        """Returns True if provisional tick interval (600ms) reached."""
+        if (
+            self.bytes_since_provisional >= self.PROVISIONAL_TICK_BYTES
+            and len(self.audio_buffer) >= self.MIN_PROCESS_BYTES
+        ):
             self.bytes_since_provisional = 0
             return True
         return False
@@ -167,6 +189,13 @@ class ChronosBuffer:
         if len(self.audio_buffer) < self.MIN_PROCESS_BYTES:
             return None
         return bytes(self.audio_buffer)
+
+    def truncate_at_offset(self, byte_offset: int) -> None:
+        """Cleanly truncate audio buffer at exact byte offset for Align-then-Commit."""
+        if 0 < byte_offset <= len(self.audio_buffer):
+            self.audio_buffer = bytearray(self.audio_buffer[byte_offset:])
+            self.silence_duration_bytes = 0
+            self.bytes_since_provisional = len(self.audio_buffer)
 
     def flush(self) -> Optional[ChronosCut]:
         """Forced flush on EOS."""
@@ -178,3 +207,4 @@ class ChronosBuffer:
             return ChronosCut(cut_type=ChronosCutType.FORCED_FLUSH, pcm_data=pcm, is_final=True)
         self.audio_buffer = bytearray()
         return None
+

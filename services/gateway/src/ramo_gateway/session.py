@@ -35,34 +35,46 @@ class GatewaySession:
         self.dialogue_history: list = []
         self.action_items: list = []
         self.chunk_seq: int = 0
-        self.deduplicator = HypothesisDeduplicator(max_ngram=5) if HypothesisDeduplicator else None
+        self.utterance_seq: int = 0
+        self.current_revision: int = 0
+        self.deduplicator = None
         self._lock = threading.Lock()
 
-    def get_current_chunk_id(self) -> str:
+    def get_current_utterance_id(self) -> str:
         with self._lock:
-            return f"c_{self.session_id}_{self.chunk_seq}"
+            return f"utt_{self.session_id}_{self.utterance_seq}"
+
+    def get_current_chunk_id(self) -> str:
+        """Alias for backward compatibility with Bridge-Tauri chunk_id."""
+        with self._lock:
+            return f"utt_{self.session_id}_{self.utterance_seq}"
+
+    def next_revision(self) -> int:
+        with self._lock:
+            self.current_revision += 1
+            return self.current_revision
+
+    def advance_utterance(self) -> str:
+        with self._lock:
+            self.utterance_seq += 1
+            self.chunk_seq += 1
+            self.current_revision = 0
+            return f"utt_{self.session_id}_{self.utterance_seq}"
 
     def advance_chunk_seq(self) -> str:
-        with self._lock:
-            self.chunk_seq += 1
-            return f"c_{self.session_id}_{self.chunk_seq}"
+        """Alias for advance_utterance for backward compatibility."""
+        return self.advance_utterance()
 
     def deduplicate_transcript(self, raw_text: str, words: list) -> Tuple[str, list]:
-        if not self.deduplicator:
-            return raw_text, words
-        with self._lock:
-            return self.deduplicator.deduplicate(raw_text, words=words)
+        """Zero acoustic overlap eliminates boundary repetition at source."""
+        return raw_text, words
 
     def get_stt_prompt(self) -> str:
-        if not self.deduplicator:
-            return ""
-        with self._lock:
-            return self.deduplicator.get_initial_prompt(max_chars=200)
+        """Static domain glossary only. Dynamic transcript feedback is strictly purged."""
+        return ""
 
     def reset_deduplicator(self) -> None:
-        if self.deduplicator:
-            with self._lock:
-                self.deduplicator.reset()
+        pass
 
     def ping(self) -> None:
         self.last_ping = time.time()

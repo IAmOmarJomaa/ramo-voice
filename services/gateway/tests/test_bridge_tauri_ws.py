@@ -61,53 +61,72 @@ def test_bridge_tauri_audio_streaming_flow(client):
     Stream audio via JSON base64 frame, followed by eos, and assert
     receipt of transcript, translation_result, and auto-tts.
     """
+    import os
+    import soundfile as sf
+    fixture_path = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "..", "..", "tests", "fixtures", "meeting_sample_en.wav")
+    )
+    audio_data, sr = sf.read(fixture_path, dtype="float32")
+    pcm_bytes = (audio_data * 32767).astype(np.int16).tobytes()
+
     with client.websocket_connect("/v1/stream") as ws:
         ws.receive_json()  # connected
 
-        # 1.0s audible tone at 16kHz
-        sr = 16000
-        t = np.linspace(0, 1.0, sr, endpoint=False, dtype=np.float32)
-        pcm_f32 = (0.3 * np.sin(2 * np.pi * 300 * t)).astype(np.float32)
-        pcm_bytes = (pcm_f32 * 32767).astype(np.int16).tobytes()
-
-        # Send audio frame with target_language=fr
-        audio_frame = {
-            "type": "audio",
-            "data": base64.b64encode(pcm_bytes).decode("ascii"),
-            "target_language": "fr",
-            "auto_tts": True,
-            "source": "mic",
-        }
-        ws.send_text(json.dumps(audio_frame))
+        # Stream audio in 0.5s chunks (16000 bytes) matching live mic input
+        chunk_size = 16000
+        for i in range(0, len(pcm_bytes), chunk_size):
+            chunk = pcm_bytes[i : i + chunk_size]
+            ws.send_text(
+                json.dumps(
+                    {
+                        "type": "audio",
+                        "data": base64.b64encode(chunk).decode("ascii"),
+                        "target_language": "fr",
+                        "auto_tts": True,
+                        "source": "mic",
+                    }
+                )
+            )
 
         # Flush via eos
         ws.send_text(json.dumps({"type": "eos"}))
 
-        # We may receive provisional transcript first, then final transcript
-        transcript_msg = ws.receive_json()
-        assert transcript_msg["type"] == "transcript"
+        # Collect and assert sequential receipt of pipeline events until tts_end
+        received_types = []
+        transcript_msg = None
+        trans_msg = None
+        tts_audio = None
+        tts_end = None
+
+        while True:
+            msg = ws.receive_json()
+            m_type = msg.get("type")
+            received_types.append(m_type)
+            if m_type == "transcript":
+                if msg.get("is_final"):
+                    transcript_msg = msg
+            elif m_type == "translation_result":
+                trans_msg = msg
+            elif m_type == "tts_audio":
+                tts_audio = msg
+            elif m_type == "tts_end":
+                tts_end = msg
+                break
+
+        assert transcript_msg is not None, "Did not receive final transcript"
         assert "text" in transcript_msg
-        if not transcript_msg["is_final"]:
-            # Provisional preview confirmed! Now receive final transcript from EOS
-            transcript_msg = ws.receive_json()
-            assert transcript_msg["type"] == "transcript"
-            assert transcript_msg["is_final"] is True
+        assert len(transcript_msg["text"]) > 0
         assert "speaker" in transcript_msg
         assert "words" in transcript_msg
 
-        # Then translation_result
-        trans_msg = ws.receive_json()
-        assert trans_msg["type"] == "translation_result"
+        assert trans_msg is not None, "Did not receive translation_result"
         assert "text" in trans_msg
         assert trans_msg["language"] == "fr"
 
-        # Then tts_audio & tts_end
-        tts_audio = ws.receive_json()
-        assert tts_audio["type"] == "tts_audio"
+        assert tts_audio is not None, "Did not receive tts_audio"
         assert "data" in tts_audio
 
-        tts_end = ws.receive_json()
-        assert tts_end["type"] == "tts_end"
+        assert tts_end is not None, "Did not receive tts_end"
 
 
 def test_rest_endpoints(client):

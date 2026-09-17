@@ -13,6 +13,15 @@ from typing import List, Dict, Any, Set, Optional
 import asyncio
 from datetime import datetime, timezone
 
+if sys.platform == "win32":
+    try:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        if hasattr(sys.stderr, "reconfigure"):
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 
 class LogStreamHub:
     """

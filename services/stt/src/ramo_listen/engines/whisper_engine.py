@@ -115,6 +115,8 @@ class WhisperSTTEngine(BaseSTTEngine):
                 beam_size=5,
                 word_timestamps=True,
                 vad_filter=False,
+                condition_on_previous_text=False,
+                temperature=0.0,
                 initial_prompt=initial_prompt,
             )
             seg_list = list(segments)

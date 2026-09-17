@@ -29,10 +29,10 @@ class SpeakerClusterer:
         norm = float(np.linalg.norm(v)) + 1e-9
         return (v / norm).astype(np.float32)
 
-    def assign_or_update(self, embedding: np.ndarray, is_overlap: bool = False) -> str:
+    def assign_or_update(self, embedding: np.ndarray, is_overlap: bool = False, freeze_centroid: bool = False) -> str:
         """
         Assign an embedding to an existing speaker or initialize a new speaker.
-        If is_overlap is True, assigns to closest speaker but skips centroid updating.
+        If is_overlap or freeze_centroid is True, assigns to closest speaker but skips centroid updating.
         Emits transparent diagnostic logs detailing each centroid comparison.
         """
         vec = self._normalize(embedding)
@@ -65,9 +65,9 @@ class SpeakerClusterer:
 
         if best_sim >= self.similarity_threshold and best_spk is not None:
             # Match existing speaker
-            if is_overlap:
+            if is_overlap or freeze_centroid:
                 logger.info(
-                    f"[DIAR_CLUSTER] ⚠️ Overlapping crosstalk turn assigned to '{best_spk}' (sim={best_sim:.4f}), centroid preserved without update."
+                    f"[DIAR_CLUSTER] ⚠️ Sub-threshold/crosstalk turn assigned to '{best_spk}' (sim={best_sim:.4f}), centroid preserved without update."
                 )
             else:
                 old_c = self._centroids[best_spk].copy()
@@ -81,10 +81,10 @@ class SpeakerClusterer:
                 )
             return best_spk
         else:
-            # Overlap/crosstalk intervals should NEVER mint a new speaker centroid
-            if is_overlap and best_spk is not None:
+            # Overlap/crosstalk or frozen intervals should NEVER mint a new speaker centroid
+            if (is_overlap or freeze_centroid) and best_spk is not None:
                 logger.info(
-                    f"[DIAR_CLUSTER] ⚠️ Overlapping crosstalk turn assigned to nearest speaker '{best_spk}' (sim={best_sim:.4f}), centroid preserved."
+                    f"[DIAR_CLUSTER] ⚠️ Overlapping/frozen turn assigned to nearest speaker '{best_spk}' (sim={best_sim:.4f}), centroid preserved."
                 )
                 return best_spk
 
