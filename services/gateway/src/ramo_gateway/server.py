@@ -139,6 +139,8 @@ async def _handle_audio_cut(
     words_list = stt_res.get("words", [])
 
     if not raw_transcript:
+        if is_final:
+            sess.advance_chunk_seq()
         return
 
     # Apply n-gram boundary deduplication on finalized chunks
@@ -146,6 +148,7 @@ async def _handle_audio_cut(
         transcript_text, words_list = sess.deduplicate_transcript(raw_transcript, words_list)
         if not transcript_text:
             logger.info("✂️ [DEDUP] Entire chunk was redundant overlap tail — skipping re-emission")
+            sess.advance_chunk_seq()
             return
     else:
         transcript_text = raw_transcript
@@ -188,6 +191,8 @@ async def _handle_audio_cut(
 
     if not is_final:
         return
+
+    sess.advance_chunk_seq()
 
     # Record dialogue turn into session memory
     sess.dialogue_history.append(f"{speaker_id}: {transcript_text}")
@@ -373,13 +378,13 @@ async def websocket_stream_endpoint(websocket: WebSocket):
                 logger.debug(f"🎙️ [AUDIO_IN] Received {len(pcm_bytes)} bytes PCM audio from {sess.source}")
                 cuts = chronos.add_audio(pcm_bytes)
                 for cut in cuts:
-                    await cut_queue.put((cut.pcm_data, cut.is_final, trace_id))
+                    await cut_queue.put((cut.pcm_data, cut.is_final, sess.get_current_chunk_id()))
 
                 # Check provisional tick
                 if chronos.should_trigger_provisional():
                     snapshot = chronos.get_provisional_snapshot()
                     if snapshot:
-                        await cut_queue.put((snapshot, False, trace_id + "_prov"))
+                        await cut_queue.put((snapshot, False, sess.get_current_chunk_id()))
 
             # JSON text frame input
             elif "text" in msg and msg["text"]:
@@ -406,13 +411,13 @@ async def websocket_stream_endpoint(websocket: WebSocket):
                             pcm_bytes = base64.b64decode(b64_data)
                             cuts = chronos.add_audio(pcm_bytes)
                             for cut in cuts:
-                                await cut_queue.put((cut.pcm_data, cut.is_final, trace_id))
+                                await cut_queue.put((cut.pcm_data, cut.is_final, sess.get_current_chunk_id()))
 
                             # Check provisional tick for live streaming grey preview
                             if chronos.should_trigger_provisional():
                                 snapshot = chronos.get_provisional_snapshot()
                                 if snapshot:
-                                    await cut_queue.put((snapshot, False, trace_id + "_prov"))
+                                    await cut_queue.put((snapshot, False, sess.get_current_chunk_id()))
                         except Exception as e:
                             logger.error(f"Error decoding base64 audio: {e}")
 
@@ -430,7 +435,7 @@ async def websocket_stream_endpoint(websocket: WebSocket):
                 elif msg_type == "eos":
                     cut = chronos.flush()
                     if cut:
-                        await cut_queue.put((cut.pcm_data, True, trace_id + "_EOS"))
+                        await cut_queue.put((cut.pcm_data, True, sess.get_current_chunk_id()))
 
                 elif msg_type in ("tts_request", "tts") or cmd_str in ("tts", "tts_request"):
                     text_to_speak = data.get("text", "")

@@ -34,8 +34,18 @@ class GatewaySession:
         self._recent_tts: Dict[str, float] = {}
         self.dialogue_history: list = []
         self.action_items: list = []
+        self.chunk_seq: int = 0
         self.deduplicator = HypothesisDeduplicator(max_ngram=5) if HypothesisDeduplicator else None
         self._lock = threading.Lock()
+
+    def get_current_chunk_id(self) -> str:
+        with self._lock:
+            return f"c_{self.session_id}_{self.chunk_seq}"
+
+    def advance_chunk_seq(self) -> str:
+        with self._lock:
+            self.chunk_seq += 1
+            return f"c_{self.session_id}_{self.chunk_seq}"
 
     def deduplicate_transcript(self, raw_text: str, words: list) -> Tuple[str, list]:
         if not self.deduplicator:
