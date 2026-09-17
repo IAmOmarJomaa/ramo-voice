@@ -143,8 +143,12 @@ def main():
         check=False
     )
 
-    # Pre-cache Qwen Neural Translation Model
-    print("  🧠 Pre-caching Qwen-2.5-1.5B Translation Model weights...", flush=True)
+    # Pre-cache Whisper large-v3 and Qwen Neural Translation Model
+    print("  🧠 Pre-caching Whisper large-v3 and Qwen-2.5-1.5B weights...", flush=True)
+    run_cmd(
+        'python -c "from faster_whisper import download_model; download_model(\'large-v3\')"',
+        check=False
+    )
     run_cmd(
         'python -c "import torch; from transformers import AutoModelForCausalLM, AutoTokenizer; AutoTokenizer.from_pretrained(\'Qwen/Qwen2.5-1.5B-Instruct\'); AutoModelForCausalLM.from_pretrained(\'Qwen/Qwen2.5-1.5B-Instruct\', torch_dtype=torch.float16)"',
         check=False
@@ -160,6 +164,7 @@ def main():
     worker_env["MALLOC_MMAP_THRESHOLD_"] = "65536"
     worker_env["RAMO_LOAD_NEURAL_LLM"] = "1"
     worker_env["RAMO_LLM_MODEL"] = os.getenv("RAMO_LLM_MODEL", "Qwen/Qwen2.5-1.5B-Instruct")
+    worker_env["WHISPER_MODEL_SIZE"] = os.getenv("WHISPER_MODEL_SIZE", "large-v3")
     worker_env["RAMO_KOKORO_MODEL"] = "models/kokoro-v0_19.onnx"
     worker_env["RAMO_KOKORO_VOICES"] = "models/voices.bin"
 

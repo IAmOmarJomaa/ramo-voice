@@ -41,7 +41,7 @@ class WhisperSTTEngine(BaseSTTEngine):
             self.device = device
 
         if model_size is None:
-            self.model_size = "base" if self.device == "cuda" else "tiny"
+            self.model_size = os.getenv("WHISPER_MODEL_SIZE", "large-v3" if self.device == "cuda" else "tiny")
         else:
             self.model_size = model_size
 

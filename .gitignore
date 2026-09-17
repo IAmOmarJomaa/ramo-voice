@@ -47,6 +47,7 @@ tests/fixtures/output_*.wav
 
 # Logs
 logs/
+*.log
 
 # OS & IDE
 .DS_Store

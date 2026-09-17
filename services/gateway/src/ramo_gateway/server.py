@@ -10,16 +10,17 @@ import base64
 import json
 import logging
 import os
+import re
 import time
 from contextlib import asynccontextmanager
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Set
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from .session import GatewaySession, SessionStore
-from .chronos import ChronosBuffer, ChronosCutType
+from .chronos import ChronosBuffer, ChronosCutType, LocalAgreement
 from .pipeline_client import PipelineDispatcher
 from .state_machine import ConversationStateMachine, SessionState
 from ramo_common.logging import setup_service_logging, tail_service_log, global_log_hub
@@ -95,18 +96,154 @@ async def _safe_send_json(ws: WebSocket, payload: dict) -> bool:
         return False
 
 
+async def _dispatch_translation_and_tts(
+    websocket: WebSocket,
+    sess: GatewaySession,
+    speaker_id: str,
+    transcript_text: str,
+    trace_id: str,
+    timestamp_str: str,
+    source_lang: str,
+    audio_f32: np.ndarray,
+    is_final: bool,
+):
+    """
+    Decoupled background task: translates text and synthesizes speech
+    asynchronously without stalling real-time STT transcription.
+    """
+    try:
+        # Record dialogue turn into session memory
+        sess.dialogue_history.append(f"{speaker_id}: {transcript_text}")
+
+        # 1. Translation
+        target_lang = sess.target_language
+        translated_text, is_bypass, llm_action = await dispatcher.translate_text(
+            text=transcript_text,
+            source_lang=source_lang,
+            target_lang=target_lang,
+            session_id=sess.session_id,
+            speaker_id=speaker_id,
+        )
+
+        if translated_text:
+            logger.info(
+                f"🌐 [TRANS_OUT] [{source_lang} -> {target_lang}] '{transcript_text}' -> '{translated_text}'"
+            )
+            await _safe_send_json(
+                websocket,
+                {
+                    "type": "translation_result",
+                    "chunk_id": trace_id,
+                    "text": translated_text,
+                    "speaker": speaker_id,
+                    "speaker_id": speaker_id,
+                    "is_owner": False,
+                    "is_final": True,
+                    "language": target_lang,
+                    "timestamp": timestamp_str,
+                },
+            )
+
+        # 2. Action items
+        action = llm_action or (dispatcher.check_action_item(transcript_text) if is_bypass else None)
+        if action:
+            logger.info(f"📋 [ACTION_ITEM] Detected action '{action}' in transcript '{transcript_text}'")
+            sess.action_items.append({"action": action, "speaker": speaker_id, "text": transcript_text})
+            await _safe_send_json(
+                websocket,
+                {
+                    "type": "action_item",
+                    "action_item": action,
+                    "action": action,
+                    "source_text": transcript_text,
+                    "speaker": speaker_id,
+                    "chunk_id": trace_id,
+                    "studio_id": sess.studio_id,
+                    "meeting_id": sess.meeting_id,
+                    "timestamp": timestamp_str,
+                    "detected_action_item": action,
+                },
+            )
+
+        # 3. Trigger async Meeting Intelligence Synthesizer periodically
+        if len(sess.dialogue_history) >= 2 and len(sess.dialogue_history) % 3 == 0:
+            async def _run_intelligence_bg(turns: list, ws: WebSocket, s_id: str):
+                try:
+                    intel = await dispatcher.extract_meeting_intelligence(turns)
+                    if any(intel.values()):
+                        await _safe_send_json(
+                            ws,
+                            {
+                                "type": "meeting_intelligence",
+                                "session_id": s_id,
+                                **intel,
+                            },
+                        )
+                except Exception as ie:
+                    logger.debug(f"Background intelligence task error: {ie}")
+
+            asyncio.create_task(_run_intelligence_bg(list(sess.dialogue_history[-6:]), websocket, sess.session_id))
+
+        # 4. Auto TTS Synthesis
+        if sess.auto_tts and translated_text:
+            prosody_buf = dispatcher.get_prosody_buffer(sess.session_id)
+            clauses = prosody_buf.add_text(translated_text)
+            if is_final:
+                clauses.extend(prosody_buf.flush())
+
+            if not clauses and translated_text:
+                clauses = [translated_text]
+
+            for clause in clauses:
+                tts_pcm, tts_sr, speed = await dispatcher.synthesize_speech(
+                    text=clause,
+                    speaker_id=speaker_id,
+                    engine_type=sess.tts_engine,
+                    speaker_audio=audio_f32,
+                )
+                if len(tts_pcm) > 0:
+                    tts_dur = len(tts_pcm) / (2.0 * tts_sr)
+                    logger.info(
+                        f"🔊 [TTS_OUT] Synthesized {len(tts_pcm)} bytes ({tts_dur:.2f}s, speed: {speed}x) @ {tts_sr}Hz for '{speaker_id}'"
+                    )
+                    await _safe_send_json(
+                        websocket,
+                        {
+                            "type": "tts_audio",
+                            "chunk_id": trace_id,
+                            "speaker_id": speaker_id,
+                            "data": base64.b64encode(tts_pcm).decode("ascii"),
+                            "sample_rate": tts_sr,
+                            "speed": speed,
+                        },
+                    )
+                    await _safe_send_json(
+                        websocket,
+                        {
+                            "type": "tts_end",
+                            "chunk_id": trace_id,
+                            "speaker_id": speaker_id,
+                        },
+                    )
+    except Exception as e:
+        logger.error(f"Error in decoupled translation/TTS worker: {e}", exc_info=True)
+
+
 async def _handle_audio_cut(
     websocket: WebSocket,
     sess: GatewaySession,
     sm: ConversationStateMachine,
+    chronos: ChronosBuffer,
+    local_agreement: LocalAgreement,
     pcm_bytes: bytes,
     is_final: bool,
     trace_id: str,
+    background_tasks: Optional[Set[asyncio.Task]] = None,
 ):
-    """Processes a discrete speech chunk through the full neural pipeline."""
+    """Processes a discrete speech chunk through the neural pipeline with immediate transcript emission."""
     duration_s = len(pcm_bytes) / 32000.0
     logger.info(
-        f"✂️ [CHRONOS] Trace: {trace_id} | Cut: {'FINAL' if is_final else 'PROVISIONAL'} "
+        f"✂️ [CHRONOS] Trace: {trace_id} | Cut: {'FINAL' if is_final else 'SLIDING_WINDOW'} "
         f"| Duration: {duration_s:.2f}s ({len(pcm_bytes)} bytes) | Source: {sess.source}"
     )
 
@@ -133,191 +270,153 @@ async def _handle_audio_cut(
     is_owner = sess.source == "mic"
     logger.info(f"👥 [DIAR_OUT] Speaker: {speaker_id} | Owner: {is_owner} | Overlap: {is_overlap}")
 
-    # 4. Speech-to-text (Faster-Whisper) with isolated context (Zero Dynamic Prompt Feedback)
+    # 4. Speech-to-text (Faster-Whisper) with isolated context
     stt_res = await dispatcher.process_stt(audio_f32, initial_prompt=None)
     raw_transcript = stt_res.get("raw_text", "").strip()
     words_list = stt_res.get("words", [])
 
     revision = sess.next_revision()
     timestamp_str = time.strftime("%I:%M %p").lstrip("0")
-
-    if not raw_transcript:
-        if is_final:
-            await _safe_send_json(websocket, {
-                "type": "transcript",
-                "event": "transcript_final",
-                "utterance_id": trace_id,
-                "revision": revision,
-                "chunk_id": trace_id,
-                "text": "",
-                "speaker": speaker_id,
-                "is_owner": is_owner,
-                "is_final": True,
-                "language": sess.target_language,
-                "source": sess.source,
-                "words": [],
-                "timestamp": timestamp_str,
-                "emotion": "<|NEUTRAL|>",
-            })
-        return
-
-    transcript_text = raw_transcript
-
-    # 5. Voice Harvesting (Strict Single-Speaker Monologue Rule)
-    if is_final and not is_overlap:
-        dispatcher.harvest_speech_turn(
-            speaker_id=speaker_id,
-            audio_f32=audio_f32,
-            transcript=transcript_text,
-            is_overlap=False,
-        )
-    elif is_overlap:
-        logger.info(f"🚫 [HARVEST_SKIP] Excluded turn for '{speaker_id}' from cloning pool due to crosstalk")
-
     emotion_tag = stt_res.get("emotion", "<|NEUTRAL|>")
     stt_lang = stt_res.get("language", "en")
-    word_count = len(words_list)
-    logger.info(
-        f"👂 [STT_OUT] '{transcript_text}' | Lang: {stt_lang} | Words: {word_count} | Emotion: {emotion_tag}"
-    )
 
-    # 4. Emit transcript frame with canonical utterance_id and monotonic revision
-    transcript_frame = {
-        "type": "transcript",
-        "event": "transcript_final" if is_final else "transcript_provisional",
-        "utterance_id": trace_id,
-        "revision": revision,
-        "chunk_id": trace_id,
-        "text": transcript_text,
-        "speaker": speaker_id,
-        "is_owner": is_owner,
-        "is_final": is_final,
-        "language": stt_lang,
-        "source": sess.source,
-        "words": words_list,
-        "timestamp": timestamp_str,
-        "emotion": emotion_tag,
-    }
-    await _safe_send_json(websocket, transcript_frame)
+    # 5. LocalAgreement (n=2) consensus & immediate transcript emission
+    if is_final:
+        # Final flush on EOS or forced flush
+        la_res = local_agreement.flush()
+        final_text = la_res.newly_committed or la_res.committed or raw_transcript
 
-    if not is_final:
+        if not final_text and raw_transcript:
+            final_text = raw_transcript
+
+        logger.info(
+            f"👂 [STT_FINAL] '{final_text}' | Lang: {stt_lang} | Emotion: {emotion_tag}"
+        )
+
+        if not is_overlap and final_text:
+            dispatcher.harvest_speech_turn(
+                speaker_id=speaker_id,
+                audio_f32=audio_f32,
+                transcript=final_text,
+                is_overlap=False,
+            )
+
+        transcript_frame = {
+            "type": "transcript",
+            "event": "transcript_final",
+            "utterance_id": trace_id,
+            "revision": revision,
+            "chunk_id": trace_id,
+            "text": final_text,
+            "speaker": speaker_id,
+            "is_owner": is_owner,
+            "is_final": True,
+            "language": stt_lang,
+            "source": sess.source,
+            "words": words_list,
+            "timestamp": timestamp_str,
+            "emotion": emotion_tag,
+        }
+        await _safe_send_json(websocket, transcript_frame)
+
+        if final_text:
+            t = asyncio.create_task(
+                _dispatch_translation_and_tts(
+                    websocket=websocket,
+                    sess=sess,
+                    speaker_id=speaker_id,
+                    transcript_text=final_text,
+                    trace_id=trace_id,
+                    timestamp_str=timestamp_str,
+                    source_lang=stt_lang,
+                    audio_f32=audio_f32,
+                    is_final=True,
+                )
+            )
+            if background_tasks is not None:
+                background_tasks.add(t)
+                t.add_done_callback(background_tasks.discard)
         return
 
-    # Record dialogue turn into session memory
-    sess.dialogue_history.append(f"{speaker_id}: {transcript_text}")
+    # Streaming / Provisional / LocalAgreement step
+    if not raw_transcript:
+        return
 
-    # 5. Translation
-    target_lang = sess.target_language
-    source_lang = stt_lang
-    translated_text, is_bypass, llm_action = await dispatcher.translate_text(
-        text=transcript_text,
-        source_lang=source_lang,
-        target_lang=target_lang,
-        session_id=sess.session_id,
-        speaker_id=speaker_id,
+    la_res = local_agreement.step(raw_transcript)
+    committed_text = la_res.committed
+    tentative_text = la_res.tentative
+    newly_committed = la_res.newly_committed
+
+    # Check if newly committed text ends with sentence boundary [.!?]
+    has_sentence_end = bool(re.search(r'[.!?]$', newly_committed.strip())) or (
+        bool(re.search(r'[.!?]$', committed_text.strip())) and bool(newly_committed)
     )
 
-    if translated_text:
+    if has_sentence_end and newly_committed:
+        # Punctuation trimming: trim confirmed audio from ChronosBuffer
+        chronos.trim_on_punctuation(text=committed_text, words=words_list)
+
         logger.info(
-            f"🌐 [TRANS_OUT] [{source_lang} -> {target_lang}] '{transcript_text}' -> '{translated_text}'"
-        )
-        await _safe_send_json(
-            websocket,
-            {
-                "type": "translation_result",
-                "chunk_id": trace_id,
-                "text": translated_text,
-                "speaker": speaker_id,
-                "speaker_id": speaker_id,
-                "is_owner": False,
-                "is_final": True,
-                "language": target_lang,
-                "timestamp": timestamp_str,
-            }
+            f"👂 [STT_COMMIT] Confirmed sentence: '{newly_committed}' | Trimming Chronos audio buffer"
         )
 
-    # 6. Action items (Prioritize LLM semantic extraction, fallback to regex only on fast-bypass)
-    action = llm_action or (dispatcher.check_action_item(transcript_text) if is_bypass else None)
-    if action:
-        logger.info(f"📋 [ACTION_ITEM] Detected action '{action}' in transcript '{transcript_text}'")
-        sess.action_items.append({"action": action, "speaker": speaker_id, "text": transcript_text})
-        await _safe_send_json(
-            websocket,
-            {
-                "type": "action_item",
-                "action_item": action,
-                "action": action,
-                "source_text": transcript_text,
-                "speaker": speaker_id,
-                "chunk_id": trace_id,
-                "studio_id": sess.studio_id,
-                "meeting_id": sess.meeting_id,
-                "timestamp": timestamp_str,
-                "detected_action_item": action,
-            }
-        )
+        transcript_frame = {
+            "type": "transcript",
+            "event": "transcript_final",
+            "utterance_id": trace_id,
+            "revision": revision,
+            "chunk_id": trace_id,
+            "text": newly_committed,
+            "speaker": speaker_id,
+            "is_owner": is_owner,
+            "is_final": True,
+            "language": stt_lang,
+            "source": sess.source,
+            "words": words_list,
+            "timestamp": timestamp_str,
+            "emotion": emotion_tag,
+        }
+        await _safe_send_json(websocket, transcript_frame)
 
-    # Node 2: Trigger async Meeting Intelligence Synthesizer periodically
-    if len(sess.dialogue_history) >= 2 and len(sess.dialogue_history) % 3 == 0:
-        async def _run_intelligence_bg(turns: list, ws: WebSocket, s_id: str):
-            try:
-                intel = await dispatcher.extract_meeting_intelligence(turns)
-                if any(intel.values()):
-                    logger.info(
-                        f"🧠 [MEETING_INTELLIGENCE] Extracted {len(intel.get('action_items', []))} action items, "
-                        f"{len(intel.get('direct_orders', []))} direct orders"
-                    )
-                    await _safe_send_json(
-                        ws,
-                        {
-                            "type": "meeting_intelligence",
-                            "session_id": s_id,
-                            **intel,
-                        },
-                    )
-            except Exception as ie:
-                logger.debug(f"Background intelligence task error: {ie}")
-
-        asyncio.create_task(_run_intelligence_bg(list(sess.dialogue_history[-6:]), websocket, sess.session_id))
-
-    # 7. Auto TTS Synthesis (strictly optional, defaults to False)
-    if sess.auto_tts and translated_text:
-        prosody_buf = dispatcher.get_prosody_buffer(sess.session_id)
-        clauses = prosody_buf.add_text(translated_text)
-        if is_final:
-            clauses.extend(prosody_buf.flush())
-
-        for clause in clauses:
-            tts_pcm, tts_sr, speed = await dispatcher.synthesize_speech(
-                text=clause,
+        # Dispatch translation & TTS in decoupled background task
+        t = asyncio.create_task(
+            _dispatch_translation_and_tts(
+                websocket=websocket,
+                sess=sess,
                 speaker_id=speaker_id,
-                engine_type=sess.tts_engine,
-                speaker_audio=audio_f32,
+                transcript_text=newly_committed,
+                trace_id=trace_id,
+                timestamp_str=timestamp_str,
+                source_lang=stt_lang,
+                audio_f32=audio_f32,
+                is_final=True,
             )
-            if len(tts_pcm) > 0:
-                tts_dur = len(tts_pcm) / (2.0 * tts_sr)
-                logger.info(
-                    f"🔊 [TTS_OUT] Synthesized {len(tts_pcm)} bytes ({tts_dur:.2f}s, speed: {speed}x) @ {tts_sr}Hz for '{speaker_id}'"
-                )
-                await _safe_send_json(
-                    websocket,
-                    {
-                        "type": "tts_audio",
-                        "chunk_id": trace_id,
-                        "speaker_id": speaker_id,
-                        "data": base64.b64encode(tts_pcm).decode("ascii"),
-                        "sample_rate": tts_sr,
-                        "speed": speed,
-                    }
-                )
-                await _safe_send_json(
-                    websocket,
-                    {
-                        "type": "tts_end",
-                        "chunk_id": trace_id,
-                        "speaker_id": speaker_id,
-                    }
-                )
+        )
+        if background_tasks is not None:
+            background_tasks.add(t)
+            t.add_done_callback(background_tasks.discard)
+        return
+
+    # Provisional preview frame for live streaming UI
+    preview_text = (committed_text + " " + tentative_text).strip() if (committed_text or tentative_text) else raw_transcript
+    if preview_text:
+        transcript_frame = {
+            "type": "transcript",
+            "event": "transcript_provisional",
+            "utterance_id": trace_id,
+            "revision": revision,
+            "chunk_id": trace_id,
+            "text": preview_text,
+            "speaker": speaker_id,
+            "is_owner": is_owner,
+            "is_final": False,
+            "language": stt_lang,
+            "source": sess.source,
+            "words": words_list,
+            "timestamp": timestamp_str,
+            "emotion": emotion_tag,
+        }
+        await _safe_send_json(websocket, transcript_frame)
 
 
 @app.websocket("/v1/stream")
@@ -331,6 +430,8 @@ async def websocket_stream_endpoint(websocket: WebSocket):
     sess = session_store.create(session_id)
     sm = ConversationStateMachine(silence_timeout_sec=0.3)
     chronos = ChronosBuffer(sample_rate=16000)
+    local_agreement = LocalAgreement(n_agreement=2)
+    background_tasks: Set[asyncio.Task] = set()
     dispatcher.reset_speaker_session()
 
     # 1. Send immediate connected handshake confirmation
@@ -362,7 +463,17 @@ async def websocket_stream_endpoint(websocket: WebSocket):
 
             try:
                 pcm_data, cut_is_final, c_trace_id = item
-                await _handle_audio_cut(websocket, sess, sm, pcm_data, cut_is_final, c_trace_id)
+                await _handle_audio_cut(
+                    websocket=websocket,
+                    sess=sess,
+                    sm=sm,
+                    chronos=chronos,
+                    local_agreement=local_agreement,
+                    pcm_bytes=pcm_data,
+                    is_final=cut_is_final,
+                    trace_id=c_trace_id,
+                    background_tasks=background_tasks,
+                )
             except asyncio.CancelledError:
                 break
             except Exception as ce:
@@ -391,12 +502,6 @@ async def websocket_stream_endpoint(websocket: WebSocket):
                     if cut.is_final:
                         sess.advance_chunk_seq()
                     await cut_queue.put((cut.pcm_data, cut.is_final, cid))
-
-                # Check provisional tick
-                if chronos.should_trigger_provisional():
-                    snapshot = chronos.get_provisional_snapshot()
-                    if snapshot:
-                        await cut_queue.put((snapshot, False, sess.get_current_chunk_id()))
 
             # JSON text frame input
             elif "text" in msg and msg["text"]:
@@ -427,12 +532,6 @@ async def websocket_stream_endpoint(websocket: WebSocket):
                                 if cut.is_final:
                                     sess.advance_chunk_seq()
                                 await cut_queue.put((cut.pcm_data, cut.is_final, cid))
-
-                            # Check provisional tick for live streaming grey preview
-                            if chronos.should_trigger_provisional():
-                                snapshot = chronos.get_provisional_snapshot()
-                                if snapshot:
-                                    await cut_queue.put((snapshot, False, sess.get_current_chunk_id()))
                         except Exception as e:
                             logger.error(f"Error decoding base64 audio: {e}")
 
@@ -449,11 +548,13 @@ async def websocket_stream_endpoint(websocket: WebSocket):
 
                 elif msg_type == "eos":
                     cut = chronos.flush()
+                    cid = sess.get_current_chunk_id()
+                    sess.advance_chunk_seq()
                     if cut:
-                        cid = sess.get_current_chunk_id()
-                        if cut.is_final:
-                            sess.advance_chunk_seq()
                         await cut_queue.put((cut.pcm_data, True, cid))
+                    else:
+                        snapshot = chronos.get_provisional_snapshot() or b""
+                        await cut_queue.put((snapshot, True, cid))
 
                 elif msg_type in ("tts_request", "tts") or cmd_str in ("tts", "tts_request"):
                     text_to_speak = data.get("text", "")
@@ -508,6 +609,8 @@ async def websocket_stream_endpoint(websocket: WebSocket):
         logger.info(f"🔴 [WS Disconnected] Session {session_id} disconnected.")
     finally:
         consumer_task.cancel()
+        for t in list(background_tasks):
+            t.cancel()
         session_store.remove(session_id)
 
 

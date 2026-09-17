@@ -60,7 +60,7 @@ class PipelineDispatcher:
 
         # 2. Diarization & Crosstalk Detection
         self.overlap_detector = AcousticOverlapDetector(sample_rate=sample_rate)
-        self.clusterer = SpeakerClusterer(similarity_threshold=0.62, momentum=0.70)
+        self.clusterer = SpeakerClusterer(similarity_threshold=0.68, momentum=0.70)
         self.segmenter = AudioSegmenter(sample_rate=sample_rate)
         self.harvester = VoiceprintHarvester(
             tier1_threshold_sec=self.config.harvesting.tier1_threshold_sec,
