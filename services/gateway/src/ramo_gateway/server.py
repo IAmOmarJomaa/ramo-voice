@@ -357,16 +357,19 @@ async def _handle_audio_cut(
         # Punctuation trimming: trim confirmed audio from ChronosBuffer
         chronos.trim_on_punctuation(text=committed_text, words=words_list)
 
+        # Advance utterance sequence so each committed sentence gets its own unique, monotonic chunk ID
+        committed_chunk_id = sess.advance_utterance()
+
         logger.info(
-            f"👂 [STT_COMMIT] Confirmed sentence: '{newly_committed}' | Trimming Chronos audio buffer"
+            f"👂 [STT_COMMIT] Confirmed sentence: '{newly_committed}' (id={committed_chunk_id}) | Trimming Chronos audio buffer"
         )
 
         transcript_frame = {
             "type": "transcript",
             "event": "transcript_final",
-            "utterance_id": trace_id,
+            "utterance_id": committed_chunk_id,
             "revision": revision,
-            "chunk_id": trace_id,
+            "chunk_id": committed_chunk_id,
             "text": newly_committed,
             "speaker": speaker_id,
             "is_owner": is_owner,
@@ -386,7 +389,7 @@ async def _handle_audio_cut(
                 sess=sess,
                 speaker_id=speaker_id,
                 transcript_text=newly_committed,
-                trace_id=trace_id,
+                trace_id=committed_chunk_id,
                 timestamp_str=timestamp_str,
                 source_lang=stt_lang,
                 audio_f32=audio_f32,
@@ -561,6 +564,7 @@ async def websocket_stream_endpoint(websocket: WebSocket):
                     text_to_speak = data.get("text", "")
                     spk_id = data.get("speaker_id", "Speaker 1")
                     voice = data.get("voice", "af_heart")
+                    req_chunk_id = data.get("chunk_id") or sess.get_current_chunk_id()
                     dedup_key = f"{spk_id}:{text_to_speak}"
 
                     if not sess.is_duplicate_tts(dedup_key):
@@ -575,7 +579,7 @@ async def websocket_stream_endpoint(websocket: WebSocket):
                                 websocket,
                                 {
                                     "type": "tts_audio",
-                                    "chunk_id": trace_id,
+                                    "chunk_id": req_chunk_id,
                                     "speaker_id": spk_id,
                                     "data": base64.b64encode(tts_pcm).decode("ascii"),
                                     "sample_rate": tts_sr,
@@ -585,7 +589,7 @@ async def websocket_stream_endpoint(websocket: WebSocket):
                                 websocket,
                                 {
                                     "type": "tts_end",
-                                    "chunk_id": trace_id,
+                                    "chunk_id": req_chunk_id,
                                     "speaker_id": spk_id,
                                 },
                             )

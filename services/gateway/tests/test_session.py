@@ -45,3 +45,18 @@ def test_session_store_lifecycle():
     store.remove("sess_abc")
     assert store.count() == 0
     assert store.get("sess_abc") is None
+
+
+def test_session_utterance_advance():
+    sess = GatewaySession(session_id="sess_seq_test")
+    id1 = sess.get_current_chunk_id()
+    assert id1 == "utt_sess_seq_test_0"
+
+    id2 = sess.advance_utterance()
+    assert id2 == "utt_sess_seq_test_1"
+    assert sess.get_current_chunk_id() == id2
+
+    id3 = sess.advance_utterance()
+    assert id3 == "utt_sess_seq_test_2"
+    assert sess.get_current_chunk_id() == id3
+
