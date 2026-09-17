@@ -14,6 +14,7 @@ import re
 import time
 from contextlib import asynccontextmanager
 from typing import Optional, Dict, Any, Set
+import numpy as np
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form, Response
 from fastapi.responses import JSONResponse
