@@ -101,6 +101,31 @@ class HubHandler(logging.Handler):
             self.handleError(record)
 
 
+class SafeStreamHandler(logging.StreamHandler):
+    """
+    Console stream handler that safely handles character encodings on Windows consoles,
+    gracefully encoding/replacing unencodable characters (e.g. emojis on cp1252)
+    without raising UnicodeEncodeError and polluting stderr with tracebacks.
+    """
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            msg = self.format(record)
+            stream = self.stream
+            terminator = getattr(self, "terminator", "\n")
+            try:
+                stream.write(msg + terminator)
+            except UnicodeEncodeError:
+                encoding = getattr(stream, "encoding", None) or "utf-8"
+                safe_msg = msg.encode(encoding, errors="replace").decode(encoding, errors="replace")
+                stream.write(safe_msg + terminator)
+            self.flush()
+        except RecursionError:
+            raise
+        except Exception:
+            self.handleError(record)
+
+
 def setup_service_logging(
     service_name: str,
     log_dir: str = "logs",
@@ -137,9 +162,9 @@ def setup_service_logging(
         logger.addHandler(rfh)
 
         # 2. Console Handler (if not present)
-        has_console = any(isinstance(h, logging.StreamHandler) and not isinstance(h, RotatingFileHandler) for h in logger.handlers)
+        has_console = any(isinstance(h, SafeStreamHandler) for h in logger.handlers)
         if not has_console:
-            ch = logging.StreamHandler(sys.stdout)
+            ch = SafeStreamHandler(sys.stdout)
             ch.setFormatter(formatter)
             ch.setLevel(level)
             logger.addHandler(ch)

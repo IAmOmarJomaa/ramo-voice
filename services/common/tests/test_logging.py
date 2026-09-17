@@ -57,3 +57,41 @@ async def test_log_stream_hub_pub_sub():
     assert "Hello live log subscriber!" in item["message"]
 
     hub.unsubscribe(queue)
+
+
+def test_safe_stream_handler_handles_emojis_on_cp1252():
+    from ramo_common.logging import SafeStreamHandler
+    import logging
+
+    class StrictCP1252Stream:
+        def __init__(self):
+            self.encoding = "cp1252"
+            self.written = []
+
+        def write(self, s: str):
+            # Strict cp1252 check - raises UnicodeEncodeError on emojis
+            s.encode("cp1252", errors="strict")
+            self.written.append(s)
+
+        def flush(self):
+            pass
+
+    mock_stream = StrictCP1252Stream()
+    handler = SafeStreamHandler(mock_stream)
+    formatter = logging.Formatter("%(message)s")
+    handler.setFormatter(formatter)
+
+    record = logging.LogRecord(
+        name="test",
+        level=logging.INFO,
+        pathname="",
+        lineno=0,
+        msg="🟢 [WS Connected] Session sess_112723 registered. 👥 🔊",
+        args=(),
+        exc_info=None,
+    )
+
+    # Should not raise UnicodeEncodeError or call handleError
+    handler.emit(record)
+    assert len(mock_stream.written) == 1
+    assert "[WS Connected]" in mock_stream.written[0]
