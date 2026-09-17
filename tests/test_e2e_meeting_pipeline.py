@@ -14,7 +14,7 @@ import pytest
 import numpy as np
 
 from ramo_clean.pipeline import AudioPreconditioner
-from ramo_listen.engines.sensevoice_engine import SenseVoiceEngine
+from ramo_listen.engines.whisper_engine import WhisperSTTEngine
 from ramo_speaker.cluster import SpeakerClusterer
 from ramo_speaker.harvester import VoiceprintHarvester, SpeakerTurn
 from ramo_voice.profiles import VoiceProfileStore, register_meeting_speaker
@@ -30,7 +30,7 @@ async def test_end_to_end_meeting_translation_flow():
 
     # 1. Initialize Pipeline Microservice Components
     cleaner = AudioPreconditioner(sample_rate=sr)
-    stt_engine = SenseVoiceEngine(sample_rate=sr)
+    stt_engine = WhisperSTTEngine(sample_rate=sr)
     await stt_engine.load()
 
     clusterer = SpeakerClusterer(similarity_threshold=0.75, momentum=0.85)
