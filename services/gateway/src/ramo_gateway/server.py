@@ -310,6 +310,13 @@ async def _handle_stt_event(
     revision = sess.next_revision()
     last_spk = sess.get_last_known_speaker()
 
+    # 1. Glossary prompt only (never pass rolling dialogue into initial_prompt!)
+    glossary_prompt = (
+        ", ".join(sess.dynamic_glossary.keys())
+        if getattr(sess, "dynamic_glossary", None)
+        else None
+    )
+
     if not event.is_final:
         # 1. State machine barge-in check
         interrupted = sm.on_speech_start()
@@ -318,7 +325,7 @@ async def _handle_stt_event(
             await _safe_send_json(websocket, {"type": "interrupt"})
 
         # 2. Provisional STT preview pass
-        stt_res = await dispatcher.process_stt(event.audio, initial_prompt=event.context_prompt or None)
+        stt_res = await dispatcher.process_stt(event.audio, initial_prompt=glossary_prompt)
         dt = time.monotonic() - t0
         pipeline.record_decode_wall_time(dt)
 
@@ -364,7 +371,7 @@ async def _handle_stt_event(
 
     # FINAL COMMIT
     sm.on_speech_stop()
-    stt_res = await dispatcher.process_stt(event.audio, initial_prompt=event.context_prompt or None)
+    stt_res = await dispatcher.process_stt(event.audio, initial_prompt=glossary_prompt)
     dt = time.monotonic() - t0
     pipeline.record_decode_wall_time(dt)
 
@@ -382,8 +389,17 @@ async def _handle_stt_event(
     if not final_text:
         return
 
-    # Update trailing 200-char context prompt for future turns (UFAL pattern)
-    pipeline.context_prompt = (pipeline.context_prompt + " " + final_text)[-200:]
+    # Echo suppression guard: reject identical consecutive transcripts under low energy
+    rms = float(np.sqrt(np.mean(event.audio ** 2) + 1e-9))
+    if sess.last_final_transcript and final_text.lower() == sess.last_final_transcript.lower():
+        if rms < 0.020:
+            logger.warning(
+                f"🛡️ [ECHO_SUPPRESSION] Discarded identical consecutive transcript under low energy ({rms:.4f}): '{final_text}'"
+            )
+            return
+
+    sess.last_final_transcript = final_text
+    sess.last_final_time = time.monotonic()
 
     logger.info(
         f"👂 [STT_FINAL] (id={event.line_id}) '{final_text}' | Lang: {stt_lang} | Emotion: {emotion_tag}"
@@ -561,6 +577,8 @@ async def websocket_stream_endpoint(websocket: WebSocket):
                         meeting_id=data.get("meeting_id"),
                         tts_engine=data.get("tts_engine"),
                     )
+                    if "dynamic_glossary" in data and isinstance(data["dynamic_glossary"], dict):
+                        sess.dynamic_glossary = data["dynamic_glossary"]
 
                 elif msg_type == "eos":
                     events = pipeline.flush()

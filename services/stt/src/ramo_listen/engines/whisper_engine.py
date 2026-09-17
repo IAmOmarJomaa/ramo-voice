@@ -94,9 +94,9 @@ class WhisperSTTEngine(BaseSTTEngine):
         duration = len(audio) / sample_rate
         events = detect_acoustic_events(audio, sample_rate=sample_rate)
 
-        # Skip inference if pure silence
+        # Skip inference if pure silence or low energy
         rms = float(np.sqrt(np.mean(audio ** 2) + 1e-9))
-        if rms < 0.005 or duration < 0.2:
+        if rms < 0.008 or duration < 0.25:
             return {
                 "text": "",
                 "raw_text": "",
@@ -142,6 +142,27 @@ class WhisperSTTEngine(BaseSTTEngine):
                     )
 
         raw_text = " ".join(raw_text_parts).strip()
+
+        # Hallucination guard: reject prompt echo under low acoustic energy
+        if initial_prompt and raw_text and rms < 0.015:
+            norm_prompt = " ".join(initial_prompt.lower().split())
+            norm_raw = " ".join(raw_text.lower().split())
+            if norm_raw in norm_prompt or norm_prompt in norm_raw:
+                logger.warning(
+                    f"🛡️ [WHISPER] Discarded hallucinated prompt echo under low energy ({rms:.4f}): '{raw_text}'"
+                )
+                return {
+                    "text": "",
+                    "raw_text": "",
+                    "words": [],
+                    "emotion": events.emotion,
+                    "has_laughter": events.has_laughter,
+                    "tags": events.tags,
+                    "duration": round(duration, 2),
+                    "confidence": 0.0,
+                    "language": getattr(info, "language", "en") if info else "en",
+                }
+
         cleaned_text = clean_transcript(raw_text)
 
 

@@ -32,6 +32,9 @@ class GatewaySession:
         self.chunk_seq: int = 0
         self.utterance_seq: int = 0
         self.current_revision: int = 0
+        self.last_final_transcript: str = ""
+        self.last_final_time: float = 0.0
+        self.dynamic_glossary: dict = {}
         self.deduplicator = None
         self._lock = threading.Lock()
 
