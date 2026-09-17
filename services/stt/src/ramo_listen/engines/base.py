@@ -4,8 +4,10 @@ ramo_listen.engines.base
 Abstract base class for streaming and batch speech-to-text engines.
 """
 
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
-from typing import Dict, Any, AsyncIterator
+from typing import Dict, Any, AsyncIterator, Optional
 import numpy as np
 
 
