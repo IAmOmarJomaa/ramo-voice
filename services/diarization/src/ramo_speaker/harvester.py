@@ -59,18 +59,22 @@ class VoiceprintHarvester:
         tier2_threshold_sec: float = 10.0,
         min_duration_sec: float = 1.0,
         target_sr: int = 16000,
+        min_snr_db: float = 12.0,
+        max_buffer_sec: float = 15.0,
     ):
         self.tier1_threshold_sec = tier1_threshold_sec
         self.tier2_threshold_sec = tier2_threshold_sec
         self.min_duration_sec = min_duration_sec
         self.target_sr = target_sr
+        self.min_snr_db = min_snr_db
+        self.max_buffer_sec = max_buffer_sec
 
         # Storage per speaker: list of (audio_chunk, transcript_chunk)
         self._speaker_audio: Dict[str, List[np.ndarray]] = {}
         self._speaker_transcripts: Dict[str, List[str]] = {}
 
     def add_turn(self, turn: SpeakerTurn) -> None:
-        """Add a speech turn. Excludes turns marked as crosstalk/overlap."""
+        """Add a speech turn. Excludes turns marked as crosstalk/overlap or low SNR."""
         if turn.is_overlap:
             logger.info(
                 f"[HARVESTER] ⚠️ Excluded overlapping turn from voiceprint harvesting for '{turn.speaker_id}' ({turn.duration_sec:.2f}s)"
@@ -80,6 +84,22 @@ class VoiceprintHarvester:
         audio = turn.audio.astype(np.float32)
         if audio.ndim > 1:
             audio = audio.mean(axis=-1)
+
+        # Check Signal-to-Noise Ratio (SNR)
+        rms = float(np.sqrt(np.mean(audio**2) + 1e-9))
+        if rms < 0.005:
+            # Silence
+            return
+
+        p10 = float(np.percentile(np.abs(audio), 10))
+        p90 = float(np.percentile(np.abs(audio), 90))
+        if p10 > 1e-4 and p90 > p10:
+            snr_db = float(20.0 * np.log10(max(p90, 1e-5) / p10))
+            if snr_db < self.min_snr_db and len(audio) > self.target_sr * 0.5:
+                logger.info(
+                    f"[HARVESTER] ⚠️ Excluded low-SNR turn ({snr_db:.1f} dB < {self.min_snr_db} dB) for '{turn.speaker_id}'"
+                )
+                return
 
         # Normalize audio peak
         max_abs = np.max(np.abs(audio)) if len(audio) > 0 else 0.0
@@ -94,6 +114,13 @@ class VoiceprintHarvester:
         self._speaker_audio[spk_id].append(audio)
         if turn.transcript:
             self._speaker_transcripts[spk_id].append(turn.transcript.strip())
+
+        # Cap memory to max_buffer_sec
+        max_samples = int(self.max_buffer_sec * self.target_sr)
+        while sum(len(c) for c in self._speaker_audio[spk_id]) > max_samples and len(self._speaker_audio[spk_id]) > 1:
+            self._speaker_audio[spk_id].pop(0)
+            if self._speaker_transcripts[spk_id]:
+                self._speaker_transcripts[spk_id].pop(0)
 
         total_samples = sum(len(c) for c in self._speaker_audio[spk_id])
         total_sec = total_samples / self.target_sr

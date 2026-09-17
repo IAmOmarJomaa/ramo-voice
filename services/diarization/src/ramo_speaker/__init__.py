@@ -10,6 +10,7 @@ __version__ = "0.1.0"
 from .cluster import SpeakerClusterer
 from .harvester import VoiceprintHarvester, SpeakerTurn, HarvestedProfile
 from .segmenter import AudioSegmenter
+from .overlap import AcousticOverlapDetector
 
 __all__ = [
     "SpeakerClusterer",
@@ -17,4 +18,5 @@ __all__ = [
     "SpeakerTurn",
     "HarvestedProfile",
     "AudioSegmenter",
+    "AcousticOverlapDetector",
 ]

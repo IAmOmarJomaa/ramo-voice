@@ -120,19 +120,35 @@ async def _handle_audio_cut(
         logger.info(f"⚡ [BARGE_IN] Speech detected during assistant turn — sending interrupt")
         await _safe_send_json(websocket, {"type": "interrupt"})
 
-    # 2. Speaker identification & inheritance
+    # 2. Overlap / Crosstalk Detection
+    is_overlap, overlap_score = dispatcher.detect_overlap(audio_f32)
+    if is_overlap:
+        logger.info(f"👥 [CROSSTALK] Detected simultaneous speech (score: {overlap_score:.2f})")
+
+    # 3. Speaker identification & inheritance
     last_spk = sess.get_last_known_speaker()
-    speaker_id = dispatcher.identify_speaker(audio_f32, last_known=last_spk)
+    speaker_id = dispatcher.identify_speaker(audio_f32, last_known=last_spk, is_overlap=is_overlap)
     sess.set_last_known_speaker(speaker_id)
     is_owner = sess.source == "mic"
-    logger.info(f"👥 [DIAR_OUT] Speaker: {speaker_id} | Owner: {is_owner}")
+    logger.info(f"👥 [DIAR_OUT] Speaker: {speaker_id} | Owner: {is_owner} | Overlap: {is_overlap}")
 
-    # 3. Speech-to-text
+    # 4. Speech-to-text (Faster-Whisper)
     stt_res = await dispatcher.process_stt(audio_f32)
     transcript_text = stt_res.get("raw_text", "").strip()
 
     if not transcript_text:
         return
+
+    # 5. Voice Harvesting (Strict Single-Speaker Monologue Rule)
+    if is_final and not is_overlap:
+        dispatcher.harvest_speech_turn(
+            speaker_id=speaker_id,
+            audio_f32=audio_f32,
+            transcript=transcript_text,
+            is_overlap=False,
+        )
+    elif is_overlap:
+        logger.info(f"🚫 [HARVEST_SKIP] Excluded turn for '{speaker_id}' from cloning pool due to crosstalk")
 
     emotion_tag = stt_res.get("emotion", "<|NEUTRAL|>")
     stt_lang = stt_res.get("language", "en")
@@ -241,34 +257,42 @@ async def _handle_audio_cut(
 
     # 7. Auto TTS Synthesis (strictly optional, defaults to False)
     if sess.auto_tts and translated_text:
-        tts_pcm, tts_sr = await dispatcher.synthesize_speech(
-            text=translated_text,
-            voice="af_heart",
-            engine_type=sess.tts_engine,
-        )
-        if len(tts_pcm) > 0:
-            tts_dur = len(tts_pcm) / (2.0 * tts_sr)
-            logger.info(
-                f"🔊 [TTS_OUT] Synthesized {len(tts_pcm)} bytes ({tts_dur:.2f}s) @ {tts_sr}Hz via {sess.tts_engine}"
+        prosody_buf = dispatcher.get_prosody_buffer(sess.session_id)
+        clauses = prosody_buf.add_text(translated_text)
+        if is_final:
+            clauses.extend(prosody_buf.flush())
+
+        for clause in clauses:
+            tts_pcm, tts_sr, speed = await dispatcher.synthesize_speech(
+                text=clause,
+                speaker_id=speaker_id,
+                engine_type=sess.tts_engine,
+                speaker_audio=audio_f32,
             )
-            await _safe_send_json(
-                websocket,
-                {
-                    "type": "tts_audio",
-                    "chunk_id": trace_id,
-                    "speaker_id": speaker_id,
-                    "data": base64.b64encode(tts_pcm).decode("ascii"),
-                    "sample_rate": tts_sr,
-                }
-            )
-            await _safe_send_json(
-                websocket,
-                {
-                    "type": "tts_end",
-                    "chunk_id": trace_id,
-                    "speaker_id": speaker_id,
-                }
-            )
+            if len(tts_pcm) > 0:
+                tts_dur = len(tts_pcm) / (2.0 * tts_sr)
+                logger.info(
+                    f"🔊 [TTS_OUT] Synthesized {len(tts_pcm)} bytes ({tts_dur:.2f}s, speed: {speed}x) @ {tts_sr}Hz for '{speaker_id}'"
+                )
+                await _safe_send_json(
+                    websocket,
+                    {
+                        "type": "tts_audio",
+                        "chunk_id": trace_id,
+                        "speaker_id": speaker_id,
+                        "data": base64.b64encode(tts_pcm).decode("ascii"),
+                        "sample_rate": tts_sr,
+                        "speed": speed,
+                    }
+                )
+                await _safe_send_json(
+                    websocket,
+                    {
+                        "type": "tts_end",
+                        "chunk_id": trace_id,
+                        "speaker_id": speaker_id,
+                    }
+                )
 
 
 @app.websocket("/v1/stream")
@@ -391,9 +415,10 @@ async def websocket_stream_endpoint(websocket: WebSocket):
                     dedup_key = f"{spk_id}:{text_to_speak}"
 
                     if not sess.is_duplicate_tts(dedup_key):
-                        tts_pcm, tts_sr = await dispatcher.synthesize_speech(
+                        tts_pcm, tts_sr, speed = await dispatcher.synthesize_speech(
                             text=text_to_speak,
                             voice=voice,
+                            speaker_id=spk_id,
                             engine_type=sess.tts_engine,
                         )
                         if len(tts_pcm) > 0:
@@ -453,7 +478,7 @@ class SpeechPayload(BaseModel):
 @app.post("/v1/audio/speech")
 async def text_to_speech_endpoint(payload: SpeechPayload):
     """OpenAI-compatible speech synthesis endpoint."""
-    pcm16, sr = await dispatcher.synthesize_speech(payload.input, voice=payload.voice, speed=payload.speed)
+    pcm16, sr, _ = await dispatcher.synthesize_speech(payload.input, voice=payload.voice)
 
     # Encode to WAV container
     import wave
@@ -502,7 +527,7 @@ class TranslatePayload(BaseModel):
 @app.post("/v1/translate")
 async def translate_endpoint(payload: TranslatePayload):
     """Direct translation endpoint."""
-    translated, is_bypass = await dispatcher.translate_text(
+    translated, is_bypass, action = await dispatcher.translate_text(
         text=payload.text,
         source_lang=payload.source_language,
         target_lang=payload.target_language,
@@ -510,6 +535,7 @@ async def translate_endpoint(payload: TranslatePayload):
     return {
         "translated_text": translated,
         "is_bypass": is_bypass,
+        "action": action,
         "source_language": payload.source_language,
         "target_language": payload.target_language,
     }

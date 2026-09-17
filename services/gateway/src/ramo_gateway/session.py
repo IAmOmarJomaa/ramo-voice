@@ -17,7 +17,7 @@ class GatewaySession:
     def __init__(self, session_id: str):
         self.session_id = session_id
         self.target_language = "fr"
-        self.auto_tts = False
+        self.auto_tts = True
         self.source = "mic"
         self.context_summary = ""
         self.studio_id = "default_studio"

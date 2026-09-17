@@ -1,0 +1,51 @@
+# ==============================================================================
+# ramO Sovereign Engine: TTS Pacer & Multi-Speaker Orchestration Configuration
+# Single Source of Truth for Harvesting, Prosody Buffering, and Dynamic Pacing
+# ==============================================================================
+
+harvesting:
+  tier1_threshold_sec: 4.5       # Minimum clean speech duration to unlock zero-shot cloning
+  tier2_threshold_sec: 10.0      # High-fidelity progressive upgrade threshold
+  max_buffer_sec: 15.0           # Maximum reference audio storage per speaker
+  min_snr_db: 12.0               # Minimum SNR to accept turn into cloning pool (reject noisy cuts)
+  min_turn_duration_sec: 0.4     # Minimum turn duration to consider for embedding / harvesting
+
+prosody_buffer:
+  min_clause_words: 4            # Minimum words before clause dispatch
+  max_clause_words: 14           # Force dispatch if clause exceeds this length
+  strong_terminators:
+    - "."
+    - "!"
+    - "?"
+    - "。"
+    - "！"
+    - "？"
+  weak_terminators:
+    - ","
+    - ";"
+    - ":"
+    - "，"
+    - "；"
+  conjunctions:
+    - "and"
+    - "but"
+    - "because"
+    - "although"
+    - "or"
+    - "however"
+    - "et"
+    - "mais"
+    - "parce que"
+    - "porque"
+  ttfa_timeout_ms: 600           # Time-To-First-Audio timeout (ms) before forcing clause flush
+
+pacer:
+  target_latency_budget_ms: 1200 # Target latency budget from source audio end to TTS playback start
+  wsola_speed_min: 1.0           # Minimum playback speed (1.0x = natural speed)
+  wsola_speed_max: 1.25          # Maximum pitch-preserving speedup (1.25x = clear queue drift)
+  queue_threshold_words: 20      # Words in pending queue that triggers dynamic speed scaling
+
+engine_selection:
+  default_fallback: "kokoro"     # Instant 50ms engine for turns < 4.5s
+  cloning_engine: "f5tts"        # Zero-shot voice cloning engine for turns >= 4.5s
+  anchor_mapping_enabled: true  # Match speaker F0 pitch to closest Kokoro preset

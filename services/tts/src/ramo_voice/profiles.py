@@ -27,6 +27,8 @@ class VoiceProfile:
     reference_wav_path: Optional[str] = None
     language: str = "en"
     prompt_text: Optional[str] = None
+    reference_audio: Optional[np.ndarray] = None
+    reference_text: Optional[str] = None
     duration_sec: float = 0.0
     use_fallback: bool = False
     fallback_preset: Optional[str] = None
@@ -47,6 +49,9 @@ class VoiceProfileStore:
     def register(self, profile: VoiceProfile) -> None:
         self._profiles[profile.voice_id] = profile
         logger.info(f"Registered voice profile: {profile.voice_id} ({profile.voice_type}, {profile.sample_rate}Hz, fallback={profile.use_fallback})")
+
+    def register_profile(self, profile: VoiceProfile) -> None:
+        self.register(profile)
 
     def get(self, voice_id: str) -> Optional[VoiceProfile]:
         return self._profiles.get(voice_id)
