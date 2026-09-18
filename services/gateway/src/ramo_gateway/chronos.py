@@ -235,6 +235,27 @@ class LiveUtterancePipeline:
         self.context_prompt: str = ""
         self.line_counter: int = 0
 
+        # Silero VAD state machine integration
+        try:
+            import sys
+            from pathlib import Path
+            clean_src = Path(__file__).resolve().parents[3] / "enhancement" / "src"
+            if clean_src.exists() and str(clean_src) not in sys.path:
+                sys.path.insert(0, str(clean_src))
+            from ramo_clean.silero_vad import SileroProcessor, SpeechStart, SpeechEnd
+            self.vad_processor = SileroProcessor(
+                redemption_ms=vad_redemption_ms,
+                min_speech_ms=min_speech_ms,
+            )
+            self._SpeechStart = SpeechStart
+            self._SpeechEnd = SpeechEnd
+            logger.info("Initialized SileroProcessor for LiveUtterancePipeline")
+        except Exception as e:
+            logger.warning(f"SileroProcessor unavailable ({e}), using energy VAD fallback")
+            self.vad_processor = None
+            self._SpeechStart = None
+            self._SpeechEnd = None
+
     def record_decode_wall_time(self, dt_s: float) -> None:
         """Update EWMA of STT inference wall-time to dynamically stretch partial interval."""
         if dt_s <= 0:
@@ -268,51 +289,90 @@ class LiveUtterancePipeline:
 
         events: List[UtteranceEvent] = []
 
-        # Determine voice presence if not explicitly provided
+        # Determine voice presence via Silero VAD when not explicitly provided
+        has_speech_start = False
+        has_speech_end = False
+
         if is_voice is None:
-            rms = calculate_rms(samples)
-            if self.in_speech:
-                # Monologue probability fade factor (Moonshine standard)
-                dur_samples = len(self.current_samples)
-                fade = calculate_fade_factor(dur_samples, self.sr, self.fade_start_s, self.max_utterance_s)
-                # Attenuate effective voice detection threshold to seek breath pauses
-                thresh = 0.010 * max(0.2, fade)
-                is_voice = rms >= thresh
+            if self.vad_processor is not None:
+                vad_evs = self.vad_processor.process(samples)
+                is_voice = self.vad_processor.in_speech
+                has_speech_start = any(isinstance(ev, self._SpeechStart) for ev in vad_evs)
+                has_speech_end = any(isinstance(ev, self._SpeechEnd) for ev in vad_evs)
             else:
-                is_voice = rms >= 0.015
+                rms = calculate_rms(samples)
+                if self.in_speech:
+                    dur_samples = len(self.current_samples)
+                    fade = calculate_fade_factor(dur_samples, self.sr, self.fade_start_s, self.max_utterance_s)
+                    thresh = 0.015 * max(0.3, fade)
+                    is_voice = rms >= thresh
+                else:
+                    is_voice = rms >= 0.025
 
-        # 1. Non-Speech State: update rolling look-behind buffer
+        # 1. Non-Speech State: update rolling look-behind buffer ONLY during silence
         if not self.in_speech:
-            if len(samples) >= self.LOOK_BEHIND_SAMPLES:
-                self.look_behind_ring[:] = samples[-self.LOOK_BEHIND_SAMPLES:]
-            else:
-                self.look_behind_ring = np.roll(self.look_behind_ring, -len(samples))
-                self.look_behind_ring[-len(samples):] = samples
-
-            # Voice Onset
-            if is_voice:
-                self.speech_run_samples += len(samples)
-                if self.speech_run_samples >= self.min_speech_samples or is_voice:
-                    self.in_speech = True
-                    self.line_counter += 1
-                    self.current_line_id = f"utt_{self.session_id}_{self.line_counter}"
-                    # Prepend look-behind to preserve plosives
-                    self.current_samples = np.concatenate([self.look_behind_ring.copy(), samples])
-                    self.last_partial_sample_count = 0
-                    self.silence_run_samples = 0
-                    self.speech_run_samples = 0
-                    logger.debug(
-                        f"[PIPELINE] 🎙️ Speech start: line_id='{self.current_line_id}' "
-                        f"(Prepended {len(self.look_behind_ring)} look-behind samples)"
-                    )
-            else:
+            if is_voice or has_speech_start:
+                self.in_speech = True
+                self.line_counter += 1
+                self.current_line_id = f"utt_{self.session_id}_{self.line_counter}"
+                # Prepend the existing pre-speech look-behind buffer
+                self.current_samples = np.concatenate([self.look_behind_ring.copy(), samples])
+                self.last_partial_sample_count = 0
+                self.silence_run_samples = 0
                 self.speech_run_samples = 0
+                logger.debug(
+                    f"[PIPELINE] 🎙️ Speech start: line_id='{self.current_line_id}' "
+                    f"(Prepended {len(self.look_behind_ring)} look-behind samples)"
+                )
+            else:
+                # Silence: roll buffer
+                if len(samples) >= self.LOOK_BEHIND_SAMPLES:
+                    self.look_behind_ring[:] = samples[-self.LOOK_BEHIND_SAMPLES:]
+                else:
+                    self.look_behind_ring = np.roll(self.look_behind_ring, -len(samples))
+                    self.look_behind_ring[-len(samples):] = samples
             return events
 
         # 2. In Speech State: voice continuing
-        if self.in_speech and is_voice:
-            self.silence_run_samples = 0
+        if self.in_speech:
             self.current_samples = np.concatenate([self.current_samples, samples])
+
+            # Check if Silero VAD triggered SpeechEnd or manual pause expiration
+            speech_has_ended = has_speech_end
+            if not is_voice and not has_speech_end:
+                self.silence_run_samples += len(samples)
+                if self.silence_run_samples >= self.vad_redemption_samples:
+                    speech_has_ended = True
+            else:
+                self.silence_run_samples = 0
+
+            if speech_has_ended:
+                logger.info(
+                    f"[PIPELINE] 🛑 Speech ended: line_id='{self.current_line_id}' "
+                    f"({len(self.current_samples)/self.sr:.2f}s total audio)"
+                )
+                self.in_speech = False
+                final_ev = UtteranceEvent(
+                    event_type="final",
+                    line_id=self.current_line_id,
+                    audio=self.current_samples.copy(),
+                    is_final=True,
+                    context_prompt=self.context_prompt,
+                    duration_s=len(self.current_samples) / self.sr,
+                )
+                events.append(final_ev)
+
+                # Reset state for next turn
+                self.current_samples = np.empty((0,), dtype=np.float32)
+                self.last_partial_sample_count = 0
+                self.silence_run_samples = 0
+                self.speech_run_samples = 0
+                self.current_line_id = None
+                return events
+
+            # If currently in silence redemption, do not emit partial previews on silence
+            if not is_voice:
+                return events
 
             # Monologue Soft-Commit Ceiling (15.0s)
             if len(self.current_samples) >= self.max_utterance_samples:
@@ -354,38 +414,6 @@ class LiveUtterancePipeline:
                     )
                 )
             return events
-
-        # 3. In Speech State: silence detected during utterance
-        if self.in_speech and not is_voice:
-            self.silence_run_samples += len(samples)
-            self.current_samples = np.concatenate([self.current_samples, samples])
-
-            if self.silence_run_samples >= self.vad_redemption_samples:
-                # 2000ms redemption window expired -> Speech has finalized!
-                logger.info(
-                    f"[PIPELINE] 🛑 Speech ended: line_id='{self.current_line_id}' "
-                    f"({len(self.current_samples)/self.sr:.2f}s total audio, {self.silence_run_samples/self.sr:.2f}s silence)"
-                )
-                self.in_speech = False
-                final_ev = UtteranceEvent(
-                    event_type="final",
-                    line_id=self.current_line_id,
-                    audio=self.current_samples.copy(),
-                    is_final=True,
-                    context_prompt=self.context_prompt,
-                    duration_s=len(self.current_samples) / self.sr,
-                )
-                events.append(final_ev)
-
-                # Reset state for next turn
-                self.current_samples = np.empty((0,), dtype=np.float32)
-                self.last_partial_sample_count = 0
-                self.silence_run_samples = 0
-                self.speech_run_samples = 0
-                self.current_line_id = None
-                return events
-
-        return events
 
     def flush(self) -> List[UtteranceEvent]:
         """EOS or forced flush."""

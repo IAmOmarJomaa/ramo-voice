@@ -143,6 +143,13 @@ def main():
         check=False
     )
 
+    # Provision Silero VAD ONNX model
+    print("  🧠 Provisioning Silero VAD ONNX weights...", flush=True)
+    run_cmd(
+        "mkdir -p models && (test -f models/silero_vad.onnx || wget -q -c -O models/silero_vad.onnx https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx)",
+        check=False
+    )
+
     # Pre-cache Whisper large-v3 and Qwen Neural Translation Model
     print("  🧠 Pre-caching Whisper large-v3 and Qwen-2.5-1.5B weights...", flush=True)
     run_cmd(

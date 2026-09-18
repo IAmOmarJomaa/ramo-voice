@@ -337,14 +337,7 @@ async def _handle_stt_event(
         if not raw_transcript:
             return
 
-        la_res = local_agreement.step(raw_transcript)
-        preview_text = (
-            (la_res.committed + " " + la_res.tentative).strip()
-            if (la_res.committed or la_res.tentative)
-            else raw_transcript
-        )
-        if not preview_text:
-            return
+        preview_text = raw_transcript
 
         # Immediate WebSocket provisional emission (<1.2s latency)
         # Note: chunk_id AND utterance_id are event.line_id
@@ -369,7 +362,7 @@ async def _handle_stt_event(
         )
         return
 
-    # FINAL COMMIT
+    # FINAL COMMIT: Batch-transcribe 100% of the accumulated turn audio
     sm.on_speech_stop()
     stt_res = await dispatcher.process_stt(event.audio, initial_prompt=glossary_prompt)
     dt = time.monotonic() - t0
@@ -380,26 +373,21 @@ async def _handle_stt_event(
     stt_lang = stt_res.get("language", "en")
     emotion_tag = stt_res.get("emotion", "<|NEUTRAL|>")
 
-    la_res = local_agreement.flush()
-    final_text = la_res.newly_committed or la_res.committed or raw_transcript
-    if not final_text and raw_transcript:
-        final_text = raw_transcript
-    final_text = final_text.strip()
-
+    final_text = raw_transcript
     if not final_text:
         return
 
-    # Echo suppression guard: reject identical consecutive transcripts under low energy
-    rms = float(np.sqrt(np.mean(event.audio ** 2) + 1e-9))
+    # Echo suppression guard: reject identical consecutive transcripts within 8.0s
+    now = time.monotonic()
     if sess.last_final_transcript and final_text.lower() == sess.last_final_transcript.lower():
-        if rms < 0.020:
+        if (now - sess.last_final_time) < 8.0:
             logger.warning(
-                f"🛡️ [ECHO_SUPPRESSION] Discarded identical consecutive transcript under low energy ({rms:.4f}): '{final_text}'"
+                f"🛡️ [ECHO_SUPPRESSION] Discarded identical consecutive transcript within 8s: '{final_text}'"
             )
             return
 
     sess.last_final_transcript = final_text
-    sess.last_final_time = time.monotonic()
+    sess.last_final_time = now
 
     logger.info(
         f"👂 [STT_FINAL] (id={event.line_id}) '{final_text}' | Lang: {stt_lang} | Emotion: {emotion_tag}"

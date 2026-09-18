@@ -58,7 +58,20 @@ class SileroVAD:
 
     def __init__(self, model_path: Optional[Union[str, Path]] = None):
         self._sess = None
-        self._model_path = Path(model_path) if model_path else None
+        if model_path is None:
+            candidates = [
+                Path("models/silero_vad.onnx"),
+                Path("c:/ramo-engine/models/silero_vad.onnx"),
+                Path(__file__).resolve().parents[5] / "models" / "silero_vad.onnx",
+            ]
+            for cand in candidates:
+                if cand.exists():
+                    self._model_path = cand
+                    break
+            else:
+                self._model_path = None
+        else:
+            self._model_path = Path(model_path)
 
         if self._model_path and self._model_path.exists():
             try:
