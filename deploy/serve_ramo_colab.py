@@ -93,12 +93,19 @@ def main():
         )
         time.sleep(2)
         run_cmd(f"tailscale up --authkey={ts_authkey} --hostname=ramo-gpu --accept-routes", check=False)
-        try:
-            ts_ip = subprocess.check_output("tailscale ip -4", shell=True).decode().strip()
-            print(f"  ✅ Tailscale connected! Node IP: {ts_ip}", flush=True)
-            print(f"  🔗 Permanent MagicDNS URL: ws://ramo-gpu:50000/v1/stream", flush=True)
-        except Exception:
-            print("  ⚠️ Could not read Tailscale IP, continuing...", flush=True)
+        for attempt in range(1, 12):
+            try:
+                out = subprocess.check_output("tailscale ip -4", shell=True, stderr=subprocess.DEVNULL).decode().strip()
+                if out and out.startswith("100."):
+                    ts_ip = out
+                    print(f"  ✅ Tailscale connected! Node IP: {ts_ip}", flush=True)
+                    print(f"  🔗 Permanent MagicDNS URL: ws://ramo-gpu:50000/v1/stream", flush=True)
+                    break
+            except Exception:
+                pass
+            time.sleep(1)
+        else:
+            print("  ⏳ Tailscale mesh negotiation in progress, will resolve IP before dashboard...", flush=True)
     else:
         print("\n[3/6] TAILSCALE_AUTHKEY not set — skipping mesh networking", flush=True)
 
@@ -238,7 +245,15 @@ def main():
                     with open(log_p, "r", encoding="utf-8", errors="replace") as lf:
                         print(lf.read()[-1000:], flush=True)
 
-    # Status Dashboard
+    # Status Dashboard (Refresh Tailscale IP dynamically in case negotiation took longer)
+    if ts_authkey:
+        try:
+            out = subprocess.check_output("tailscale ip -4", shell=True, stderr=subprocess.DEVNULL).decode().strip()
+            if out and out.startswith("100."):
+                ts_ip = out
+        except Exception:
+            pass
+
     print("=" * 70, flush=True)
     print("📊 ramO Sovereign Audio Intelligence Dashboard (Google Colab T4)", flush=True)
     print("=" * 70, flush=True)
@@ -275,8 +290,8 @@ def main():
             now = time.time()
             if now - last_heartbeat >= 30.0:
                 telem = get_system_telemetry()
-                timestamp = time.strftime("%H:%M:%S")
-                print(f"💓 [HEARTBEAT {timestamp}] Colab T4 Active | {telem} | ws://ramo-gpu:50000/v1/stream", flush=True)
+                direct_str = f" | ws://{ts_ip}:50000/v1/stream" if ts_ip != "127.0.0.1" else ""
+                print(f"💓 [HEARTBEAT {timestamp}] Colab T4 Active | {telem} | ws://ramo-gpu:50000/v1/stream{direct_str}", flush=True)
                 last_heartbeat = now
 
             for tag, path in log_files.items():
