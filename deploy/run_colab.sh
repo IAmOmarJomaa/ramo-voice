@@ -83,9 +83,13 @@ for cand in "${CANDIDATES[@]}"; do
 done
 
 if [ -z "$TARGET_DIR" ] || [ ! -d "$TARGET_DIR" ]; then
-    TARGET_DIR="/home/iamomar/${COLAB_ACC}"
-    mkdir -p "$TARGET_DIR"
-    echo "[*] Auto-created Colab profile directory: $TARGET_DIR"
+    if [ -f "${USER_HOME}/.config/colab-cli/token.json" ] && [ -z "$1" ]; then
+        TARGET_DIR="${USER_HOME}"
+    else
+        TARGET_DIR="${USER_HOME}/${COLAB_ACC}"
+        mkdir -p "$TARGET_DIR"
+        echo "[*] Auto-created Colab profile directory: $TARGET_DIR"
+    fi
 fi
 
 COLAB_BIN=""
