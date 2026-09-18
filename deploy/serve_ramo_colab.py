@@ -290,6 +290,7 @@ def main():
             now = time.time()
             if now - last_heartbeat >= 30.0:
                 telem = get_system_telemetry()
+                timestamp = time.strftime("%H:%M:%S")
                 direct_str = f" | ws://{ts_ip}:50000/v1/stream" if ts_ip != "127.0.0.1" else ""
                 print(f"💓 [HEARTBEAT {timestamp}] Colab T4 Active | {telem} | ws://ramo-gpu:50000/v1/stream{direct_str}", flush=True)
                 last_heartbeat = now
