@@ -56,6 +56,7 @@ import os
 os.environ["TAILSCALE_AUTHKEY"] = "$TAILSCALE_AUTHKEY"
 os.environ["HF_TOKEN"] = "$HF_TOKEN"
 os.environ["GITHUB_TOKEN"] = "${GITHUB_TOKEN:-}"
+os.environ["RAMO_ENABLE_TTS"] = "${RAMO_ENABLE_TTS:-False}"
 EOF
 
 cat deploy/serve_ramo_colab.py >> serve_ramo_injected.py

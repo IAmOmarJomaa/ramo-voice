@@ -4,6 +4,7 @@ ramo_gateway.session
 Session state tracking and duplicate TTS trigger suppression for Bridge-Tauri connections.
 """
 
+import os
 import time
 import threading
 from typing import Dict, Optional, Tuple, List, Any
@@ -17,7 +18,7 @@ class GatewaySession:
     def __init__(self, session_id: str):
         self.session_id = session_id
         self.target_language = "fr"
-        self.auto_tts = True
+        self.auto_tts = os.getenv("RAMO_ENABLE_TTS", "true").lower() in ("true", "1", "yes")
         self.source = "mic"
         self.context_summary = ""
         self.studio_id = "default_studio"

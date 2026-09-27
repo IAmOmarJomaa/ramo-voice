@@ -64,4 +64,5 @@ serve_ramo_injected.py
 # Tooling
 .gitnexus/
 .claude/
+.agent/
 

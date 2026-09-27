@@ -10,6 +10,7 @@ Supports dual execution:
 
 from __future__ import annotations
 
+import os
 import asyncio
 import base64
 import io
@@ -96,8 +97,12 @@ class PipelineDispatcher:
             return
         logger.info("Initializing in-process sovereign pipeline engines...")
         await self.stt.load()
-        await self.tts_supertonic.load()
-        await self.tts_kokoro.load()
+        enable_tts = os.getenv("RAMO_ENABLE_TTS", "true").lower() in ("true", "1", "yes")
+        if enable_tts:
+            await self.tts_supertonic.load()
+            await self.tts_kokoro.load()
+        else:
+            logger.info("🔇 TTS disabled via RAMO_ENABLE_TTS=False; skipping TTS engine warm-up.")
         await self.translator.engine.load()
         self._initialized = True
 
@@ -254,6 +259,11 @@ class PipelineDispatcher:
         """
         if not self._initialized:
             await self.initialize()
+
+        enable_tts = os.getenv("RAMO_ENABLE_TTS", "true").lower() in ("true", "1", "yes")
+        if not enable_tts:
+            logger.debug("🔇 TTS disabled via RAMO_ENABLE_TTS=False; returning empty synthesis.")
+            return b"", 24000, 1.0
 
         # Check if speaker has harvested zero-shot profile
         cloned_profile = default_store.get(speaker_id)

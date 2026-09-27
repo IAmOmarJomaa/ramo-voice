@@ -86,16 +86,48 @@ def main():
     if ts_authkey:
         print("\n[3/6] Starting Tailscale Mesh...", flush=True)
         run_cmd("command -v tailscale >/dev/null || curl -fsSL https://tailscale.com/install.sh | sh", check=False)
-        subprocess.Popen(
-            ["tailscaled", "--tun=userspace-networking", "--socks5-server=localhost:1055"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+        run_cmd("sudo mkdir -p /var/run/tailscale /var/lib/tailscale /tmp/tailscale && sudo chmod 777 /var/run/tailscale /var/lib/tailscale /tmp/tailscale", check=False)
+        run_cmd("pkill -9 tailscaled 2>/dev/null || true", check=False)
+        time.sleep(1)
+
+        os.makedirs("logs", exist_ok=True)
+        ts_log = open("logs/tailscaled.log", "w")
+        ts_proc = subprocess.Popen(
+            [
+                "tailscaled",
+                "--tun=userspace-networking",
+                "--socks5-server=localhost:1055",
+                "--outbound-http-proxy-listen=localhost:1055",
+                "--state=/var/lib/tailscale/tailscaled.state",
+                "--socket=/var/run/tailscale/tailscaled.sock",
+            ],
+            stdout=ts_log,
+            stderr=ts_log,
         )
         time.sleep(2)
-        run_cmd(f"tailscale up --authkey={ts_authkey} --hostname=ramo-gpu --accept-routes", check=False)
-        for attempt in range(1, 12):
+        if ts_proc.poll() is not None:
+            print("  ❌ tailscaled daemon exited unexpectedly. Content of logs/tailscaled.log:", flush=True)
+            if os.path.exists("logs/tailscaled.log"):
+                with open("logs/tailscaled.log", "r") as f:
+                    print(f.read(), flush=True)
+        else:
+            print("  ✅ tailscaled daemon is active in userspace mode.", flush=True)
+
+        up_cmd = f"tailscale --socket=/var/run/tailscale/tailscaled.sock up --authkey={ts_authkey} --hostname=ramo-gpu --accept-routes --reset"
+        print(f"[*] Running: tailscale up (authenticating node)...", flush=True)
+        up_res = subprocess.run(up_cmd, shell=True, capture_output=True, text=True)
+        if up_res.returncode != 0:
+            err_msg = (up_res.stderr or up_res.stdout).strip()
+            print(f"  ❌ tailscale up failed (code {up_res.returncode}):\n{err_msg}", flush=True)
+            if "already been used" in err_msg or "invalid" in err_msg.lower() or "expired" in err_msg.lower():
+                print("  🚨 CRITICAL: The TAILSCALE_AUTHKEY in .env is single-use and already used, or expired!", flush=True)
+                print("     Please generate a reusable, ephemeral authkey in the Tailscale Admin Console.", flush=True)
+        else:
+            print("  ✅ tailscale up authenticated successfully!", flush=True)
+
+        for attempt in range(1, 15):
             try:
-                out = subprocess.check_output("tailscale ip -4", shell=True, stderr=subprocess.DEVNULL).decode().strip()
+                out = subprocess.check_output("tailscale --socket=/var/run/tailscale/tailscaled.sock ip -4", shell=True, stderr=subprocess.DEVNULL).decode().strip()
                 if out and out.startswith("100."):
                     ts_ip = out
                     print(f"  ✅ Tailscale connected! Node IP: {ts_ip}", flush=True)
@@ -105,7 +137,8 @@ def main():
                 pass
             time.sleep(1)
         else:
-            print("  ⏳ Tailscale mesh negotiation in progress, will resolve IP before dashboard...", flush=True)
+            print("  ⏳ Tailscale IP not yet acquired. Current tailscale status:", flush=True)
+            run_cmd("tailscale --socket=/var/run/tailscale/tailscaled.sock status || true", check=False)
     else:
         print("\n[3/6] TAILSCALE_AUTHKEY not set — skipping mesh networking", flush=True)
 
@@ -141,14 +174,19 @@ def main():
         check=False
     )
 
+    enable_tts = os.environ.get("RAMO_ENABLE_TTS", "true").lower() in ("true", "1", "yes")
+
     # Provision Kokoro-82M ONNX Speech Model
-    print("  🧠 Provisioning Kokoro-82M ONNX weights and voice vectors...", flush=True)
-    run_cmd(
-        "mkdir -p models && "
-        "(test -f models/kokoro-v0_19.onnx || wget -q -c -O models/kokoro-v0_19.onnx https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files/kokoro-v0_19.onnx) && "
-        "(test -f models/voices.bin || wget -q -c -O models/voices.bin https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files/voices.bin)",
-        check=False
-    )
+    if enable_tts:
+        print("  🧠 Provisioning Kokoro-82M ONNX weights and voice vectors...", flush=True)
+        run_cmd(
+            "mkdir -p models && "
+            "(test -f models/kokoro-v0_19.onnx || wget -q -c -O models/kokoro-v0_19.onnx https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files/kokoro-v0_19.onnx) && "
+            "(test -f models/voices.bin || wget -q -c -O models/voices.bin https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files/voices.bin)",
+            check=False
+        )
+    else:
+        print("  🔇 RAMO_ENABLE_TTS=False: Skipping Kokoro-82M ONNX provisioning.", flush=True)
 
     # Provision Silero VAD ONNX model
     print("  🧠 Provisioning Silero VAD ONNX weights...", flush=True)
@@ -177,6 +215,7 @@ def main():
     worker_env["MALLOC_TRIM_THRESHOLD_"] = "65536"
     worker_env["MALLOC_MMAP_THRESHOLD_"] = "65536"
     worker_env["RAMO_LOAD_NEURAL_LLM"] = "1"
+    worker_env["RAMO_ENABLE_TTS"] = "1" if enable_tts else "0"
     worker_env["RAMO_LLM_MODEL"] = os.getenv("RAMO_LLM_MODEL", "Qwen/Qwen2.5-1.5B-Instruct")
     worker_env["WHISPER_MODEL_SIZE"] = os.getenv("WHISPER_MODEL_SIZE", "large-v3")
     worker_env["RAMO_KOKORO_MODEL"] = "models/kokoro-v0_19.onnx"
@@ -193,11 +232,16 @@ def main():
         ("STT", 50051, "ramo_listen", f"{common_path}:services/stt/src", "ramo_listen.server:app"),
         ("Diarization", 50052, "ramo_speaker", f"{common_path}:services/diarization/src", "ramo_speaker.server:app"),
         ("Translation", 50053, "ramo_translate", f"{common_path}:services/translation/src", "ramo_translate.server:app"),
-        ("TTS", 50055, "ramo_voice", f"{common_path}:services/tts/src", "ramo_voice.server:app"),
-        ("Gateway", 50000, "ramo_gateway", f"{common_path}:services/gateway/src:services/enhancement/src:services/stt/src:services/diarization/src:services/translation/src:services/tts/src", "ramo_gateway.server:app"),
     ]
+    if enable_tts:
+        services_config.append(("TTS", 50055, "ramo_voice", f"{common_path}:services/tts/src", "ramo_voice.server:app"))
 
-    print("\n[6/6] Launching Sovereign Microservices Swarm...", flush=True)
+    # Gateway requires services/tts/src on PYTHONPATH for top-level store/profile imports even if TTS microservice is disabled
+    gw_path = f"{common_path}:services/gateway/src:services/enhancement/src:services/stt/src:services/diarization/src:services/translation/src:services/tts/src"
+    services_config.append(("Gateway", 50000, "ramo_gateway", gw_path, "ramo_gateway.server:app"))
+
+    total_services = len(services_config)
+    print(f"\n[6/6] Launching Sovereign Microservices Swarm ({total_services} services)...", flush=True)
     procs = {}
 
     for name, port, pkg, pypath, app_str in services_config:
@@ -219,7 +263,7 @@ def main():
         procs[name] = (proc, port, log_path)
 
     # Active Readiness Gate: Wait for ports to become open
-    print("\n⏳ Active Readiness Gate: Waiting for all 6 microservices to report healthy...", flush=True)
+    print(f"\n⏳ Active Readiness Gate: Waiting for all {total_services} microservices to report healthy...", flush=True)
     ready_ports = set()
     all_ports = {port for _, port, _, _, _ in services_config}
 
@@ -228,16 +272,16 @@ def main():
         for name, port, _, _, _ in services_config:
             if port not in ready_ports and check_socket(port):
                 ready_ports.add(port)
-                print(f"  ✅ {name} on port {port} is SERVING & HEALTHY! ({len(ready_ports)}/6 ready)", flush=True)
+                print(f"  ✅ {name} on port {port} is SERVING & HEALTHY! ({len(ready_ports)}/{total_services} ready)", flush=True)
         if len(ready_ports) == len(all_ports):
             break
         if attempt > 0 and attempt % 10 == 0:
-            print(f"     ... warming up neural weights ({len(ready_ports)}/6 ready, {attempt}s elapsed)...", flush=True)
+            print(f"     ... warming up neural weights ({len(ready_ports)}/{total_services} ready, {attempt}s elapsed)...", flush=True)
 
     if len(ready_ports) == len(all_ports):
-        print("\n🎉 ALL 6 SOVEREIGN SERVICES ARE WARMED UP & SERVING ON PORT 50000!\n", flush=True)
+        print(f"\n🎉 ALL {total_services} SOVEREIGN SERVICES ARE WARMED UP & SERVING ON PORT 50000!\n", flush=True)
     else:
-        print(f"\n⚠️ Swarm booted with {len(ready_ports)}/6 services ready. Checking crashed logs...\n", flush=True)
+        print(f"\n⚠️ Swarm booted with {len(ready_ports)}/{total_services} services ready. Checking crashed logs...\n", flush=True)
         for name, (p, port, log_p) in procs.items():
             if port not in ready_ports:
                 print(f"[-] Log snippet for {name} ({log_p}):", flush=True)
@@ -248,7 +292,7 @@ def main():
     # Status Dashboard (Refresh Tailscale IP dynamically in case negotiation took longer)
     if ts_authkey:
         try:
-            out = subprocess.check_output("tailscale ip -4", shell=True, stderr=subprocess.DEVNULL).decode().strip()
+            out = subprocess.check_output("tailscale --socket=/var/run/tailscale/tailscaled.sock ip -4", shell=True, stderr=subprocess.DEVNULL).decode().strip()
             if out and out.startswith("100."):
                 ts_ip = out
         except Exception:
@@ -277,8 +321,9 @@ def main():
         "STT": "logs/ramo_listen.log",
         "DIAR": "logs/ramo_speaker.log",
         "TRANS": "logs/ramo_translate.log",
-        "TTS": "logs/ramo_voice.log",
     }
+    if enable_tts:
+        log_files["TTS"] = "logs/ramo_voice.log"
     handles = {}
     last_heartbeat = 0
 
